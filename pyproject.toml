@@ -1,0 +1,21 @@
+[project]
+name = "ai-value-assessment"
+version = "1.0.0"
+description = "AI Value Assessment - Audit Bedrock model invocation logs and produce Stop/Refine/Expand HTML/Markdown/JSON reports"
+readme = "README.md"
+license = "MIT-0"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3>=1.35.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+aiva = "aiva.cli:main"
+
+[tool.setuptools]
+packages = ["aiva"]

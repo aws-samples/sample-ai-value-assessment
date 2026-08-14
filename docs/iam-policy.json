@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Comment": "Least-privilege policy for running AI Value Assessment. Read-only on the Model Invocation Logs bucket + Bedrock invoke for classification. Replace <LOG_BUCKET>, <REGION>, and <ACCOUNT_ID> before attaching. AI Value Assessment never writes to your account; the report is written to local disk.",
+  "Statement": [
+    {
+      "Sid": "ReadModelInvocationLogsBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::<LOG_BUCKET>",
+        "arn:aws:s3:::<LOG_BUCKET>/*"
+      ]
+    },
+    {
+      "Sid": "InvokeBedrockForClassification",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:<REGION>::foundation-model/*",
+        "arn:aws:bedrock:<REGION>:<ACCOUNT_ID>:inference-profile/*"
+      ]
+    }
+  ]
+}

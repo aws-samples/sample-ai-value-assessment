@@ -1,0 +1,17 @@
+__pycache__/
+*.py[oc]
+*.egg-info
+.venv
+.DS_Store
+.pytest_cache
+.env
+*.pem
+credentials
+credentials.json
+# Generated reports contain real customer prompt content - never commit.
+report.html
+report.md
+report.json
+*.report.html
+*.report.md
+*.report.json

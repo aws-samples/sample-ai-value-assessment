@@ -1,0 +1,442 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AI Value Assessment, click-to-deploy audit. Reads Bedrock Model Invocation
+  Logs from a source S3 bucket, classifies business use cases, and writes
+  the report to a destination S3 bucket. All compute (CodeBuild) and storage
+  runs inside this AWS account; nothing is read onto a local machine. Deploy
+  the stack and the audit starts automatically. Deploy this stack in the
+  SAME REGION as SourceBucketName - Bedrock model access, IAM policy scope,
+  and Model Invocation Logging are all regional, deploying cross-region is
+  unsupported and will fail pre-flight or IAM checks.
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: >-
+      S3 bucket containing your Bedrock Model Invocation Logs (read-only
+      access is granted to this bucket only). The IAM role created by this
+      stack is minted with read access to whatever bucket name is entered
+      here, deploy this stack only with a bucket you are authorized to
+      grant that access to.
+  SourceBucketPrefix:
+    Type: String
+    Default: bedrock-logs
+    Description: S3 key prefix under SourceBucketName where the logs live.
+  WindowDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 90
+    Description: Number of days of logs to analyse.
+  MaxUseCases:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    Description: >-
+      Cap on named use cases in the report; overflow rolls into one "Other"
+      entry. Raise this if you expect more distinct use cases than the
+      default, cost per extra slot is a fraction of a cent.
+  ClassifierModelId:
+    Type: String
+    Default: us.anthropic.claude-sonnet-4-6
+    Description: Bedrock model ID (inference profile) used to classify usage.
+  DestinationBucketName:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional. Name for the new S3 bucket the report is written to. Leave
+      blank to let CloudFormation generate a unique name.
+  PackageSourceUrl:
+    Type: String
+    Default: git+https://github.com/aws-samples/sample-ai-value-assessment.git
+    Description: >-
+      Where CodeBuild installs the audit tool from. Override only if you are
+      running a fork. Not pinned to a version or commit: this is an
+      accepted gap until the package has a public GitHub release to pin
+      against (see README's Limitations); until then, anyone who can alter
+      what this URL resolves to can run arbitrary code in CodeBuild holding
+      AuditProjectRole.
+  ReportReaderPrincipalArn:
+    Type: String
+    Default: ""
+    Description: >-
+      IAM principal ARN (a user, role, or group's assumable role) allowed to
+      read the report bucket, e.g. an admin group's role or a named
+      individual's role. Leave blank to default to any IAM principal in
+      this account - public access is always blocked regardless. The report
+      contains real prompt/response excerpts, scope this to who should
+      actually see that.
+
+Conditions:
+  HasDestinationBucketName: !Not [!Equals [!Ref DestinationBucketName, ""]]
+  HasReportReaderPrincipalArn: !Not [!Equals [!Ref ReportReaderPrincipalArn, ""]]
+
+Resources:
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    #checkov:skip=CKV_AWS_18:Terminal logging target for DestinationBucket; intentionally does not log itself (no further bucket to log to without an unbounded logging chain)
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  DestinationBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !If
+        - HasDestinationBucketName
+        - !Ref DestinationBucketName
+        - !Ref AWS::NoValue
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: destination-bucket-access-logs/
+
+  DestinationBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DestinationBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DestinationBucket.Arn
+              - !Sub "${DestinationBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          # Public-access-block prevents anonymous/public reads, but on its
+          # own does not stop any IAM principal in the account with
+          # s3:GetObject from reading the report (real prompt/response
+          # excerpts). This explicitly denies reads to everyone except
+          # ReportReaderPrincipalArn (or, if unset, any principal in this
+          # account) - narrower than "anyone with s3:GetObject anywhere",
+          # but not narrowed to one identity unless the parameter is set.
+          - Sid: DenyReadExceptReportReader
+            Effect: Deny
+            Principal: "*"
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource:
+              - !Sub "${DestinationBucket.Arn}/*"
+            Condition:
+              StringNotLike:
+                aws:PrincipalArn: !If
+                  - HasReportReaderPrincipalArn
+                  - !Ref ReportReaderPrincipalArn
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:*"
+
+  AuditEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "Encrypts CodeBuild build output and its CloudWatch Logs for ${AWS::StackName}."
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogsEncrypt
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+          - Sid: AllowCodeBuildUseOfKey
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  AuditLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${AWS::StackName}-audit"
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt AuditEncryptionKey.Arn
+
+  AuditProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadSourceLogsBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadModelInvocationLogsBucket
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${SourceBucketName}"
+                  - !Sub "arn:aws:s3:::${SourceBucketName}/*"
+        - PolicyName: WriteDestinationBucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteReportToDestinationBucket
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${DestinationBucket.Arn}/*"
+        - PolicyName: InvokeBedrockForClassification
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeBedrockForClassification
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  # Wildcard region on foundation-model: a "us."/"eu."-style
+                  # cross-region inference profile can dispatch the actual
+                  # invocation to any region in its pool, not just the one
+                  # the stack deployed in or the profile was called from.
+                  # IAM authorizes against wherever it actually lands, so a
+                  # single-region ARN here is not enough even in the
+                  # same-region deployment this template requires.
+                  # foundation-model is not account-scoped, so this stays
+                  # tightly bound (no account wildcard, no other service).
+                  - "arn:aws:bedrock:*::foundation-model/*"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+        - PolicyName: WriteCodeBuildLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteCodeBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt AuditLogGroup.Arn
+                  - !Sub "${AuditLogGroup.Arn}:*"
+
+  AuditProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${AWS::StackName}-audit"
+      Description: Runs the AI Value Assessment audit end to end inside this account.
+      ServiceRole: !GetAtt AuditProjectRole.Arn
+      EncryptionKey: !GetAtt AuditEncryptionKey.Arn
+      # 24h: the true worst case is unknown (customer log volume varies
+      # widely, and Pass 2b is not yet concurrent - see the README's
+      # Limitations), so this is deliberately well above the documented
+      # ~5-8h estimate for a large enterprise window rather than tuned to it.
+      # CodeBuild's real API range is 5 min-36h (2160 min), confirmed via
+      # `aws codebuild update-project`; cfn-lint's schema caps this
+      # property at 480 and will flag 1440 as a false positive.
+      TimeoutInMinutes: 1440
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.11
+              commands:
+                - pip install --quiet "${PackageSourceUrl}"
+            build:
+              commands:
+                - echo "Running AI Value Assessment audit on s3://${SourceBucketName}/${SourceBucketPrefix}"
+                - aiva audit
+                    --bucket "${SourceBucketName}"
+                    --prefix "${SourceBucketPrefix}"
+                    --region "${AWS::Region}"
+                    --days ${WindowDays}
+                    --model "${ClassifierModelId}"
+                    --max-use-cases ${MaxUseCases}
+                    --output /tmp/report
+            post_build:
+              commands:
+                - aws s3 cp /tmp/report.html "s3://${DestinationBucket}/report.html"
+                - aws s3 cp /tmp/report.md "s3://${DestinationBucket}/report.md"
+                - aws s3 cp /tmp/report.json "s3://${DestinationBucket}/report.json"
+                - echo "Report written to s3://${DestinationBucket}/"
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref AuditLogGroup
+
+  TriggerAuditFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartAuditBuild
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: StartAuditBuild
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                Resource: !GetAtt AuditProject.Arn
+              - Sid: WriteLambdaLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  TriggerAuditFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: >-
+        Custom-resource handler: starts the audit CodeBuild project once,
+        right after the stack finishes creating. Fire-and-forget, it does not
+        wait for the (potentially hours-long) audit to finish.
+      # Accepted risk, reviewed: this function's only job is one
+      # codebuild:StartBuild call, invocable only by CloudFormation via its
+      # resource-based policy (see the TriggerAudit custom resource), and it
+      # runs once per stack create/update. A DLQ, ReservedConcurrentExecutions,
+      # and VPC placement (flagged by checkov/cfn_nag) would add real
+      # complexity - VPC placement specifically needs NAT/VPC-endpoint access
+      # back out to the CodeBuild API - disproportionate to this function's
+      # narrow, low-blast-radius purpose. Revisit if its role changes.
+      Handler: index.handler
+      Runtime: python3.12
+      Timeout: 30
+      Role: !GetAtt TriggerAuditFunctionRole.Arn
+      Code:
+        ZipFile: |
+          # No cfnresponse import: that module is only present via an
+          # AWS-managed layer, not guaranteed in every runtime image, and a
+          # missing import here would fail before any response is sent,
+          # leaving the stack hung until the provider framework times out
+          # (about an hour). Send the signed S3 PUT directly instead.
+          import json
+          import urllib.request
+          import urllib.parse
+          import boto3
+
+          def handler(event, context):
+              status, reason, data = "SUCCESS", "", {}
+              try:
+                  if event["RequestType"] in ("Create", "Update"):
+                      project = event["ResourceProperties"]["ProjectName"]
+                      boto3.client("codebuild").start_build(projectName=project)
+              except Exception as e:
+                  status, reason = "FAILED", str(e)
+
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch log stream {context.log_stream_name}",
+                  "PhysicalResourceId": event.get("PhysicalResourceId") or context.log_stream_name,
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "Data": data,
+              }).encode("utf-8")
+
+              # This function's resource-based policy already restricts
+              # invocation to CloudFormation, so a spoofed event should not
+              # be reachable in practice. This is defence in depth: only PUT
+              # to a real CloudFormation-issued presigned S3 URL, never to
+              # an arbitrary host an event happened to carry.
+              host = urllib.parse.urlparse(event["ResponseURL"]).hostname or ""
+              if not host.endswith(".amazonaws.com"):
+                  raise ValueError(f"Refusing to PUT response to unexpected host: {host}")
+
+              req = urllib.request.Request(
+                  url=event["ResponseURL"], data=body, method="PUT",
+                  headers={"Content-Type": "", "Content-Length": str(len(body))},
+              )
+              urllib.request.urlopen(req)
+
+  TriggerAudit:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt TriggerAuditFunction.Arn
+      ProjectName: !Ref AuditProject
+      # Forces the trigger to re-run on every stack update, not just create.
+      UpdateToken: !Ref AWS::StackId
+
+Outputs:
+  DestinationBucketNameOutput:
+    Description: >-
+      Report lands here once the audit finishes: report.html, report.md,
+      report.json. Check the CodeBuild project's status/logs to know when
+      it's done.
+    Value: !Ref DestinationBucket
+  AuditProjectNameOutput:
+    Description: CodeBuild project running the audit. View its build history/logs for progress.
+    Value: !Ref AuditProject
+  AuditProjectConsoleUrl:
+    Description: Direct console link to the CodeBuild project's build history.
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/codesuite/codebuild/projects/${AuditProject}/history"
