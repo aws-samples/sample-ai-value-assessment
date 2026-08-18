@@ -117,8 +117,8 @@ Sonnet 4.6, at $3.00 per million input tokens and $15.00 per million output.
 | Log volume (1 week) | Objects / invocations | Distinct sessions | Approx cost to run |
 |---------------------|-----------------------|-------------------|--------------------|
 | Small team          | ~1,000                | ~20               | a few cents        |
-| Department          | ~20,000               | ~400              | tens of cents to ~$1 |
-| Org-wide            | ~200,000              | ~4,000            | a few dollars      |
+| Department          | ~20,000               | ~400              | ~$1-3              |
+| Org-wide            | ~200,000              | ~4,000            | ~$20-40            |
 
 The middle row is close to a real one-week run measured during development.
 Actual cost depends on prompt sizes and how many sessions your logs contain,
