@@ -2,12 +2,13 @@ import json
 from datetime import datetime, timezone
 
 
-def generate_json_report(assessments, output_path, meta=None):
+def generate_json_report(assessments, output_path, meta=None, show_samples=False):
     """Write a machine-readable JSON report (Prowler-style, one file).
 
     Structured for downstream tooling: a summary block plus one record per use
-    case with verdict, the two orthogonal axes, aggregated metrics, structured
-    cost-optimisation checks, and a few example samples for context. `meta`
+    case with verdict, the two orthogonal axes, aggregated metrics, and structured
+    cost-optimisation checks. Raw prompt samples are only included when
+    show_samples=True (off by default to protect employee privacy). `meta`
     carries run context (bucket, window, generated-at).
     """
     total_cost = sum(a["metrics"]["total_cost_usd"] for a in assessments)
@@ -55,8 +56,6 @@ def generate_json_report(assessments, output_path, meta=None):
                 "models_used": m.get("models_used", []),
                 "caller_count": m.get("caller_count", 0),
             },
-            # A few example samples for context. NOTE: contains real prompt
-            # content - the report stays in the customer's environment.
             "samples": [
                 {
                     "user_message": s.get("user_message", "")[:800],
@@ -64,14 +63,14 @@ def generate_json_report(assessments, output_path, meta=None):
                 }
                 for sess in a.get("sessions", [])[:2]
                 for s in sess.get("samples", [])[:2]
-            ][:4],
+            ][:4] if show_samples else [],
         })
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
 
-def generate_report(assessments, output_path):
+def generate_report(assessments, output_path, show_samples=False):
     """Generate a markdown report: Business view first, Technical view second."""
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]

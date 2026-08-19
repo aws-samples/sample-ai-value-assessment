@@ -273,12 +273,19 @@ def _assessment(name="Test Use Case", recommendation="REFINE"):
 
 def test_html_report_generates_and_escapes_content(tmp_path):
     out = tmp_path / "report.html"
+    # Default: no samples rendered (privacy-safe)
     generate_html_report([_assessment()], str(out))
     html = out.read_text()
     assert "Test Use Case" in html
-    # Untrusted sample content must be HTML-escaped, not injected raw.
     assert "<script>alert(1)</script>" not in html
-    assert "&lt;script&gt;" in html
+    assert "&lt;script&gt;" not in html  # samples omitted entirely by default
+
+    # With --show-samples: content must be HTML-escaped, not injected raw.
+    out2 = tmp_path / "report_samples.html"
+    generate_html_report([_assessment()], str(out2), show_samples=True)
+    html2 = out2.read_text()
+    assert "<script>alert(1)</script>" not in html2
+    assert "&lt;script&gt;" in html2
 
 
 def test_markdown_report_generates(tmp_path):
