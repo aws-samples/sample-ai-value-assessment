@@ -37,7 +37,8 @@ def main():
 @click.option("--skip-preflight", is_flag=True, default=False, help="Skip credential/bucket/model access checks (not recommended)")
 @click.option("--db", default=None, help="Path to the local SQLite store (default: a temp file, deleted after the run)")
 @click.option("--max-use-cases", default=50, type=int, help="Cap on named use cases (Pass 2b calls); overflow rolls into one 'Other' cluster. Set above your expected use-case count, cost per extra slot is a fraction of a cent")
-def audit(bucket, prefix, region, days, output, fmt, model, skip_preflight, db, max_use_cases):
+@click.option("--show-samples", is_flag=True, default=False, help="Include raw prompt/response samples in the report (off by default to protect employee privacy)")
+def audit(bucket, prefix, region, days, output, fmt, model, skip_preflight, db, max_use_cases, show_samples):
     """Run a full audit on Model Invocation Logs."""
     console.print(f"\n[bold]AI Value Assessment Audit[/bold]")
     console.print(f"  Bucket: s3://{bucket}/{prefix}")
@@ -64,7 +65,7 @@ def audit(bucket, prefix, region, days, output, fmt, model, skip_preflight, db, 
         cleanup_db = True
 
     try:
-        _run_audit(bucket, prefix, region, days, output, fmt, model, db_path, max_use_cases)
+        _run_audit(bucket, prefix, region, days, output, fmt, model, db_path, max_use_cases, show_samples)
     finally:
         if cleanup_db:
             for suffix in ("", "-wal", "-shm"):
@@ -74,15 +75,15 @@ def audit(bucket, prefix, region, days, output, fmt, model, skip_preflight, db, 
                     pass
 
 
-def _run_audit(bucket, prefix, region, days, output, fmt, model, db_path, max_use_cases):
+def _run_audit(bucket, prefix, region, days, output, fmt, model, db_path, max_use_cases, show_samples):
     store = AuditStore(db_path)
     try:
-        _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, max_use_cases)
+        _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, max_use_cases, show_samples)
     finally:
         store.close()
 
 
-def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, max_use_cases):
+def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, max_use_cases, show_samples):
     # Step 1: Read logs from S3, streamed into the store in batches.
     console.print("[1/5] Reading invocation logs from S3...")
     read_invocation_logs_to_store(store, bucket, prefix, region, days)
@@ -135,17 +136,17 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
 
     if fmt in ("html", "both", "all"):
         html_path = f"{output}.html"
-        generate_html_report(assessments, html_path)
+        generate_html_report(assessments, html_path, show_samples=show_samples)
         console.print(f"  [green]HTML report: {html_path}[/green]")
 
     if fmt in ("md", "both", "all"):
         md_path = f"{output}.md"
-        generate_report(assessments, md_path)
+        generate_report(assessments, md_path, show_samples=show_samples)
         console.print(f"  [green]Markdown report: {md_path}[/green]")
 
     if fmt in ("json", "all"):
         json_path = f"{output}.json"
-        generate_json_report(assessments, json_path, meta=run_meta)
+        generate_json_report(assessments, json_path, meta=run_meta, show_samples=show_samples)
         console.print(f"  [green]JSON report: {json_path}[/green]")
 
     # Show audit overhead

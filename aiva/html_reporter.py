@@ -328,7 +328,6 @@ _REPORT_STYLE = """
         }
         .session-item-header:hover { background: #161b22; }
         .si-activity { color: #e1e4e8; }
-        .si-activity .si-caller { display: block; font-size: 10px; color: #8b949e; margin-top: 2px; }
         .si-meta { font-size: 10px; color: #8b949e; white-space: nowrap; }
         .si-cost { font-size: 12px; font-weight: 600; color: #f0f6fc; }
         .si-chevron { color: #8b949e; font-size: 9px; transition: transform 0.2s; }
@@ -386,12 +385,16 @@ def _use_case_id(a):
     return "uc_" + hashlib.sha256(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
-def generate_html_report(assessments, output_path):
+def generate_html_report(assessments, output_path, show_samples=False):
     """Generate a use-case HTML dashboard: Business summary + Technical drill-down.
 
     Each assessment is a de-duplicated business USE CASE that may span several
     sessions. The card shows the business view; expanding reveals the technical
-    view (cost optimisations, underlying sessions, prompt samples).
+    view (cost optimisations, underlying sessions, and optionally prompt samples).
+
+    By default, raw prompt/response samples and caller identities are omitted to
+    protect employee privacy (aggregate analysis only). Pass show_samples=True
+    to include them.
     """
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]
@@ -410,7 +413,7 @@ def generate_html_report(assessments, output_path):
         assessments,
         key=lambda x: (x.get("category") == "coding", -x["metrics"]["total_cost_usd"]),
     )
-    use_cases_html = _render_use_case_list(all_sorted)
+    use_cases_html = _render_use_case_list(all_sorted, show_samples=show_samples)
 
     coding_count = sum(1 for a in assessments if a.get("category") == "coding")
     noncoding_count = len(assessments) - coding_count
@@ -499,11 +502,11 @@ def generate_html_report(assessments, output_path):
         f.write(html)
 
 
-def _render_use_case_list(assessments):
-    return "".join(_render_use_case(a) for a in assessments)
+def _render_use_case_list(assessments, show_samples=False):
+    return "".join(_render_use_case(a, show_samples=show_samples) for a in assessments)
 
 
-def _render_use_case(a):
+def _render_use_case(a, show_samples=False):
     """One use case: business summary in the header/body, technical view on expand."""
     m = a["metrics"]
     rec = a["recommendation"].lower()
@@ -577,7 +580,7 @@ def _render_use_case(a):
                 <div class="metric"><div class="val">{_escape(', '.join(_short_models(m['models_used'])))}</div><div class="lbl">Model(s)</div></div>
             </div>
             {_render_cost_checks(a)}
-            {_render_sessions(a)}
+            {_render_sessions(a, show_samples=show_samples)}
         </div>
     </div>"""
 
@@ -638,8 +641,8 @@ def _render_cost_checks(a):
     </div>'''
 
 
-def _render_sessions(a):
-    """Render the underlying sessions with prompt samples (deepest drill-down)."""
+def _render_sessions(a, show_samples=False):
+    """Render the underlying sessions (and optionally prompt samples)."""
     sessions = a.get("sessions", [])
     if not sessions:
         return ""
@@ -647,34 +650,32 @@ def _render_sessions(a):
     rows = []
     for s in sessions:
         sm = s["metrics"]
-        caller = s.get("caller", "")
-        caller_short = caller.split("/")[-1] if "/" in caller else caller
         duration = s.get("duration", "")
 
         samples_html = ""
-        for smp in s.get("samples", []):
-            samples_html += f'''<div class="sample">
-                <div class="s-header">
-                    <span>{_escape(smp.get("timestamp", ""))}</span>
-                    <span class="tokens">{smp.get("input_tokens", 0):,} in / {smp.get("output_tokens", 0):,} out</span>
-                </div>
-                <div class="s-label prompt">User Prompt</div>
-                <div class="s-content">{_escape(smp.get("user_message", "(empty)"))}</div>
-                <div class="s-label response">Response</div>
-                <div class="s-content">{_escape(smp.get("response_preview", "(empty)"))}</div>
-            </div>'''
-
-        if not samples_html:
-            samples_html = '<p class="no-samples">No prompt samples captured.</p>'
+        if show_samples:
+            for smp in s.get("samples", []):
+                samples_html += f'''<div class="sample">
+                    <div class="s-header">
+                        <span>{_escape(smp.get("timestamp", ""))}</span>
+                        <span class="tokens">{smp.get("input_tokens", 0):,} in / {smp.get("output_tokens", 0):,} out</span>
+                    </div>
+                    <div class="s-label prompt">User Prompt</div>
+                    <div class="s-content">{_escape(smp.get("user_message", "(empty)"))}</div>
+                    <div class="s-label response">Response</div>
+                    <div class="s-content">{_escape(smp.get("response_preview", "(empty)"))}</div>
+                </div>'''
+            if not samples_html:
+                samples_html = '<p class="no-samples">No prompt samples captured.</p>'
 
         rows.append(f'''<div class="session-item">
             <div class="session-item-header">
-                <span class="si-activity">{_escape(s.get("activity", "Activity"))}<span class="si-caller">{_escape(caller_short)}{(" &middot; " + _escape(duration)) if duration else ""}</span></span>
+                <span class="si-activity">{_escape(s.get("activity", "Activity"))}{(" &middot; " + _escape(duration)) if duration else ""}</span>
                 <span class="si-meta">{sm['invocation_count']} inv</span>
                 <span class="si-cost">${sm['total_cost_usd']:.2f}</span>
-                <span class="si-chevron">&#9654;</span>
+                {"<span class='si-chevron'>&#9654;</span>" if show_samples else ""}
             </div>
-            <div class="session-item-body">{samples_html}</div>
+            {"<div class='session-item-body'>" + samples_html + "</div>" if show_samples else ""}
         </div>''')
 
     return f'''<div class="sessions-block">
