@@ -91,6 +91,8 @@ human review, not automated action.
 
 ## How it works
 
+![Architecture diagram](docs/architecture.png)
+
 The audit runs in three passes over the logs:
 
 ```

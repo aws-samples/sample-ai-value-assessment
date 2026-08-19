@@ -43,6 +43,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
             "nature": a.get("nature", "experimental"),
             "nature_reasoning": a.get("nature_reasoning", ""),
             "reasoning": a.get("reasoning", ""),
+            "example_tasks": a.get("example_tasks", []),
             "refinement_suggestions": a.get("refinement_suggestions", []),
             "cost_optimizations": a.get("cost_optimizations", {}),
             "projected_monthly_cost_usd": round(a.get("projected_monthly_cost_usd", 0.0), 2),
@@ -157,6 +158,9 @@ def _write_business(lines, a):
                  f"({m['invocation_count']:,} invocations)")
     if a.get("nature_reasoning"):
         lines.append(f"\n**Pattern:** {a['nature_reasoning']}")
+    if a.get("example_tasks"):
+        examples = " | ".join(f'"{e}"' for e in a["example_tasks"][:3])
+        lines.append(f"\n**Examples:** {examples}")
     lines.append(f"\n**Why:** {a['reasoning']}")
     if a.get("estimated_monthly_projection"):
         lines.append(f"\n**If this continues:** {a['estimated_monthly_projection']}")

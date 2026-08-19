@@ -524,6 +524,7 @@ Respond in this exact JSON format:
     "nature": "experimental" | "repeatable",
     "nature_reasoning": "One sentence: why experimental or repeatable, and if repeatable, whether it looks like unmanaged shadow IT worth surfacing",
     "reasoning": "2-3 sentences on the BUSINESS value and efficiency of this use case",
+    "example_tasks": ["Short verbatim-style example of a task in this use case", "Another example", "A third"],
     "refinement_suggestions": ["suggestion 1", "suggestion 2"],
     "cost_optimizations": {{
         "model_right_sizing": {{"status": "pass|warn|fail", "detail": "Is the cheapest capable model being used? Suggest specific alternatives if overpowered."}},
@@ -547,7 +548,15 @@ Nature criteria (separate from the recommendation):
 
 Category criteria:
 - coding: Software engineering assistance - writing/editing/reviewing code, debugging, agentic dev tooling. This is expected, low-insight usage; it will be collapsed in the report.
-- non_coding: Anything else - meeting/notes capture, customer-facing bots, content generation, data classification/extraction, research, pipelines. These are the interesting use cases the audit exists to surface."""
+- non_coding: Anything else - meeting/notes capture, customer-facing bots, content generation, data classification/extraction, research, pipelines. These are the interesting use cases the audit exists to surface.
+
+Example tasks criteria:
+- Provide 2-3 short, representative examples of what people actually asked/did in this use case
+- Write them as paraphrased task descriptions, NOT verbatim quotes from the logs
+- De-identify: remove names, project names, customer names, internal identifiers
+- They should help someone reading the report instantly understand the flavour of the work
+- Good: "Compare RDS vs Aurora pricing for multi-AZ deployment"
+- Bad: "John asked about the Acme Corp database migration cost" (contains PII)"""
 
     parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit")
 
@@ -573,6 +582,7 @@ Category criteria:
         "nature": parsed.get("nature", "experimental"),
         "nature_reasoning": parsed.get("nature_reasoning", ""),
         "reasoning": parsed.get("reasoning", ""),
+        "example_tasks": parsed.get("example_tasks", []),
         "refinement_suggestions": parsed.get("refinement_suggestions", []),
         "cost_optimizations": cost_optimizations,
         "projected_monthly_cost_usd": projected_monthly,

@@ -543,6 +543,11 @@ def _render_use_case(a, show_samples=False):
         items = "".join(f'<li>{_escape(s)}</li>' for s in a["refinement_suggestions"])
         suggestions_html = f'<ul class="suggestions">{items}</ul>'
 
+    examples_html = ""
+    if a.get("example_tasks"):
+        items = " &middot; ".join(f'"{_escape(e)}"' for e in a["example_tasks"][:3])
+        examples_html = f'<div class="value-line" style="margin-top:6px;"><strong>Examples:</strong> {items}</div>'
+
     value_html = f'<div class="value-line">Business value: {_escape(value_line)}</div>' if value_line else ""
 
     is_coding = a.get("category") == "coding"
@@ -566,6 +571,7 @@ def _render_use_case(a, show_samples=False):
                 <div class="verdict-reason"><strong>Why {a['recommendation']}:</strong> {_escape(verdict_reason)}</div>
                 <div class="why">{_escape(reasoning)}</div>
                 {value_html}
+                {examples_html}
             </div>
             {pattern_html}
             {projection_html}
