@@ -491,6 +491,7 @@ def generate_html_report(assessments, output_path, show_samples=False):
 
         <div class="footer">
             AI Value Assessment v1.0.0 &middot; Data stays in your account &middot; Business view + technical drill-down
+            <br><span style="color:#d29922;font-size:11px;">Note: Example tasks are model-generated paraphrases, not verbatim quotes. Despite de-identification instructions, they may inadvertently contain PII. Review before sharing externally.</span>
         </div>
     </div>
 
