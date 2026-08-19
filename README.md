@@ -89,6 +89,11 @@ code, not by the model.
 Classification is semantic. Treat each recommendation as a starting point for
 human review, not automated action.
 
+**Privacy note:** Example tasks shown per use case are model-generated
+paraphrases, not verbatim quotes from logs. The model is instructed to
+de-identify (remove names, project names, customer names), but this is
+best-effort. Review the report before sharing it outside your immediate team.
+
 ## How it works
 
 ![Architecture diagram](docs/architecture.png)
