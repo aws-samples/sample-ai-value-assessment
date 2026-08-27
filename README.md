@@ -46,8 +46,7 @@ Bedrock invoke, not your own identity.
 
 The `aiva` package also runs on your machine. The audit runs as a local process
 using your AWS credentials, and both the working data and the report land on
-local disk with real prompt and response content included. Prefer the
-CloudFormation deploy above unless you have a reason not to.
+local disk.
 
 ```bash
 git clone https://github.com/aws-samples/sample-ai-value-assessment.git
