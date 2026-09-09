@@ -71,7 +71,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
         json.dump(report, f, indent=2)
 
 
-def generate_report(assessments, output_path, show_samples=False):
+def generate_report(assessments, output_path, show_samples=False, source="bedrock"):
     """Generate a markdown report: Business view first, Technical view second."""
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]
@@ -98,6 +98,11 @@ def generate_report(assessments, output_path, show_samples=False):
     if stop:
         stop_cost = sum(a["metrics"]["total_cost_usd"] for a in stop)
         lines.append(f"| Potential savings (STOP) | ${stop_cost:.2f} |")
+
+    if source == "otlp":
+        lines.append(f"\n> **Data source: OpenTelemetry.** Cost figures are estimated from "
+                      "token counts and published model pricing. They do not reflect "
+                      "negotiated rates, provisioned throughput, or batch discounts.")
 
     # -------------------------------------------------------------------
     # Business view

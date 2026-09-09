@@ -8,10 +8,14 @@ Run: source .venv/bin/activate && pytest tests/ -v
 import json
 import os
 
-from aiva.reader import _get_pricing, PRICING_PER_1K, UNKNOWN_PRICING
+from aiva.pricing import get_pricing, PRICING_PER_1K, UNKNOWN_PRICING
 from aiva.cli import _group_into_sessions
 from aiva.classifier import _apply_verdict_rubric, project_monthly_cost, cap_use_cases, _build_cluster
 from aiva.html_reporter import _use_case_id, generate_html_report
+from aiva.otlp_reader import (
+    _normalise_log_record, _normalise_span_record,
+    _extract_resource_attrs, _nano_to_iso, _read_otlp_file,
+)
 from aiva.reporter import generate_report, generate_json_report
 from aiva.store import AuditStore
 
@@ -22,20 +26,20 @@ from aiva.store import AuditStore
 
 def test_pricing_longest_match_wins():
     # opus-4-8 must not collide with a shorter "opus" prefix that isn't there.
-    pricing, priced = _get_pricing("us.anthropic.claude-opus-4-8-20260101-v1:0")
+    pricing, priced = get_pricing("us.anthropic.claude-opus-4-8-20260101-v1:0")
     assert priced is True
     assert pricing == PRICING_PER_1K["claude-opus-4-8"]
 
 
 def test_pricing_unknown_model_fails_loud():
-    pricing, priced = _get_pricing("some.unknown.model-v9")
+    pricing, priced = get_pricing("some.unknown.model-v9")
     assert priced is False
     assert pricing == UNKNOWN_PRICING
 
 
 def test_pricing_sonnet_vs_opus_distinct_rates():
-    sonnet, _ = _get_pricing("us.anthropic.claude-sonnet-4-6-v1:0")
-    opus, _ = _get_pricing("us.anthropic.claude-opus-4-6-v1:0")
+    sonnet, _ = get_pricing("us.anthropic.claude-sonnet-4-6-v1:0")
+    opus, _ = get_pricing("us.anthropic.claude-opus-4-6-v1:0")
     assert sonnet != opus
     assert sonnet["input"] < opus["input"]
 
@@ -371,4 +375,174 @@ def test_store_fetch_full_invocations_returns_only_requested_ids_in_order(tmp_pa
 def test_store_fetch_full_invocations_empty_ids_returns_empty(tmp_path):
     store = AuditStore(str(tmp_path / "audit.db"))
     assert store.fetch_full_invocations([]) == []
+    store.close()
+
+
+# ---------------------------------------------------------------------------
+# OTLP reader: normalisation of OTLP-JSON log records and spans
+# ---------------------------------------------------------------------------
+
+def _otlp_attr(key, value, vtype="stringValue"):
+    """Build an OTLP attribute dict."""
+    return {"key": key, "value": {vtype: value}}
+
+
+def _otlp_log_record(attrs=None, time_nano=1700000000_000000000, body_text=""):
+    """Build a minimal OTLP log record."""
+    record = {
+        "timeUnixNano": str(time_nano),
+        "attributes": attrs or [],
+        "body": {"stringValue": body_text},
+    }
+    return record
+
+
+def _otlp_resource_attrs(service_name="claude-code", enduser_id="user@example.com",
+                          session_id="sess-abc"):
+    """Build resource attributes in OTLP format."""
+    attrs = [
+        _otlp_attr("service.name", service_name),
+    ]
+    if enduser_id:
+        attrs.append(_otlp_attr("enduser.id", enduser_id))
+    if session_id:
+        attrs.append(_otlp_attr("session.id", session_id))
+    return {"resource": {"attributes": attrs}}
+
+
+def test_otlp_extract_resource_attrs():
+    entry = _otlp_resource_attrs(service_name="my-agent", enduser_id="alice")
+    attrs = _extract_resource_attrs(entry)
+    assert attrs["service.name"] == "my-agent"
+    assert attrs["enduser.id"] == "alice"
+
+
+def test_otlp_normalise_log_record_with_token_counts():
+    log_attrs = [
+        _otlp_attr("event.name", "claude_code.api_request"),
+        _otlp_attr("gen_ai.request.model", "claude-sonnet-4-6"),
+        _otlp_attr("gen_ai.usage.input_tokens", 1000, vtype="intValue"),
+        _otlp_attr("gen_ai.usage.output_tokens", 200, vtype="intValue"),
+        _otlp_attr("session.id", "sess-123"),
+    ]
+    resource_attrs = {"enduser.id": "test-user", "service.name": "claude-code"}
+
+    record = _normalise_log_record(
+        _otlp_log_record(attrs=log_attrs), resource_attrs
+    )
+
+    assert record is not None
+    assert record["model"] == "claude-sonnet-4-6"
+    assert record["input_tokens"] == 1000
+    assert record["output_tokens"] == 200
+    assert record["caller"] == "test-user"
+    assert record["cost_priced"] is False  # OTLP cost is always an estimate
+    assert record["estimated_cost_usd"] > 0
+    assert record["metadata"]["session_id"] == "sess-123"
+    assert record["metadata"]["source_format"] == "otlp"
+
+
+def test_otlp_normalise_log_record_unknown_caller_when_no_enduser():
+    log_attrs = [
+        _otlp_attr("event.name", "claude_code.api_request"),
+        _otlp_attr("gen_ai.request.model", "claude-haiku-3-5"),
+        _otlp_attr("gen_ai.usage.input_tokens", 50, vtype="intValue"),
+    ]
+    resource_attrs = {"service.name": "claude-code"}
+
+    record = _normalise_log_record(
+        _otlp_log_record(attrs=log_attrs), resource_attrs
+    )
+
+    assert record is not None
+    assert record["caller"] == "unknown"
+
+
+def test_otlp_normalise_log_record_filters_irrelevant_events():
+    log_attrs = [
+        _otlp_attr("event.name", "http.client.request"),
+    ]
+    resource_attrs = {"service.name": "some-service"}
+
+    record = _normalise_log_record(
+        _otlp_log_record(attrs=log_attrs), resource_attrs
+    )
+
+    assert record is None
+
+
+def test_otlp_normalise_log_record_captures_prompt_content():
+    log_attrs = [
+        _otlp_attr("event.name", "claude_code.user_prompt"),
+        _otlp_attr("gen_ai.request.model", "claude-sonnet-4-6"),
+        _otlp_attr("gen_ai.prompt", "Explain how S3 bucket policies work"),
+        _otlp_attr("gen_ai.completion", "S3 bucket policies are JSON documents..."),
+    ]
+    resource_attrs = {"enduser.id": "dev-1", "service.name": "claude-code"}
+
+    record = _normalise_log_record(
+        _otlp_log_record(attrs=log_attrs), resource_attrs
+    )
+
+    assert record is not None
+    assert len(record["messages"]) == 1
+    assert record["messages"][0]["content"] == "Explain how S3 bucket policies work"
+    assert "S3 bucket policies" in record["response_text"]
+
+
+def test_otlp_normalise_span_record():
+    span = {
+        "name": "claude_code.llm_request",
+        "startTimeUnixNano": "1700000000000000000",
+        "endTimeUnixNano": "1700000005000000000",
+        "attributes": [
+            _otlp_attr("gen_ai.request.model", "claude-opus-4-6"),
+            _otlp_attr("gen_ai.usage.input_tokens", 5000, vtype="intValue"),
+            _otlp_attr("gen_ai.usage.output_tokens", 1000, vtype="intValue"),
+            _otlp_attr("session.id", "span-sess"),
+        ],
+    }
+    resource_attrs = {"enduser.id": "span-user", "service.name": "claude-code"}
+
+    record = _normalise_span_record(span, resource_attrs)
+
+    assert record is not None
+    assert record["model"] == "claude-opus-4-6"
+    assert record["input_tokens"] == 5000
+    assert record["caller"] == "span-user"
+    assert record["operation"] == "claude_code.llm_request"
+
+
+def test_otlp_nano_to_iso():
+    assert _nano_to_iso(1700000000_000000000) == "2023-11-14T22:13:20+00:00"
+    assert _nano_to_iso(0) == ""
+    assert _nano_to_iso(None) == ""
+
+
+def test_otlp_normalised_records_insert_into_store(tmp_path):
+    """OTLP records go through the same store path as Bedrock records."""
+    log_attrs = [
+        _otlp_attr("event.name", "claude_code.api_request"),
+        _otlp_attr("gen_ai.request.model", "claude-sonnet-4-6"),
+        _otlp_attr("gen_ai.usage.input_tokens", 100, vtype="intValue"),
+        _otlp_attr("gen_ai.usage.output_tokens", 50, vtype="intValue"),
+        _otlp_attr("session.id", "otlp-sess-1"),
+    ]
+    resource_attrs = {"enduser.id": "otlp-user", "service.name": "claude-code"}
+
+    record = _normalise_log_record(
+        _otlp_log_record(attrs=log_attrs), resource_attrs
+    )
+
+    store = AuditStore(str(tmp_path / "audit.db"))
+    store.insert_invocations([(record, "s3://bucket/otlp/file1.json", "2026-01-01T00:00:00Z")])
+
+    rows = store.fetch_light_rows()
+    assert len(rows) == 1
+    assert rows[0]["caller"] == "otlp-user"
+    assert rows[0]["session_key"] == "otlp-sess-1"
+    assert rows[0]["model"] == "claude-sonnet-4-6"
+
+    full = store.fetch_full_invocations([rows[0]["id"]])
+    assert full[0]["metadata"]["source_format"] == "otlp"
     store.close()

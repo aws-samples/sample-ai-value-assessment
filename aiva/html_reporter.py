@@ -351,6 +351,11 @@ _REPORT_STYLE = """
         }
         .no-samples { font-size: 11px; color: #8b949e; }
 
+        .source-caveat {
+            padding: 10px 16px; margin-bottom: 16px; border-radius: 8px;
+            background: #2a2a3e; color: #b0b0c8; font-size: 0.85em;
+        }
+
         .footer {
             text-align: center; padding: 24px 0; border-top: 1px solid #21262d;
             color: #8b949e; font-size: 12px; margin-top: 32px;
@@ -385,7 +390,7 @@ def _use_case_id(a):
     return "uc_" + hashlib.sha256(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
-def generate_html_report(assessments, output_path, show_samples=False):
+def generate_html_report(assessments, output_path, show_samples=False, source="bedrock"):
     """Generate a use-case HTML dashboard: Business summary + Technical drill-down.
 
     Each assessment is a de-duplicated business USE CASE that may span several
@@ -432,7 +437,7 @@ def generate_html_report(assessments, output_path, show_samples=False):
         <div class="header">
             <div>
                 <h1>AI Value Assessment</h1>
-                <div class="subtitle">Model Invocation Audit Report</div>
+                <div class="subtitle">{"OTLP Telemetry" if source == "otlp" else "Model Invocation"} Audit Report</div>
             </div>
             <div class="timestamp">Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</div>
         </div>
@@ -468,6 +473,7 @@ def generate_html_report(assessments, output_path, show_samples=False):
             </div>
         </div>
 
+        {'<div class="source-caveat">Data source: OpenTelemetry telemetry. Cost figures are estimated from token counts and published model pricing. They do not reflect negotiated rates, provisioned throughput, or batch discounts.</div>' if source == "otlp" else ""}
         <div class="cost-bar-section">
             <h3>Cost by Recommendation</h3>
             {_render_cost_bar(stop_cost, refine_cost, expand_cost, total_cost)}

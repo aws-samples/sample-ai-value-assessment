@@ -8,6 +8,7 @@ from rich.console import Console
 from datetime import datetime, timezone
 
 from aiva.reader import read_invocation_logs_to_store
+from aiva.otlp_reader import read_otlp_logs_to_store
 from aiva.classifier import classify_activities, cluster_use_cases, classify_use_cases, cap_use_cases
 from aiva.reporter import generate_report, generate_json_report
 from aiva.html_reporter import generate_html_report
@@ -22,7 +23,7 @@ _STATUS_MARK = {"pass": "[ok]", "warn": "[warn]", "fail": "[FAIL]"}
 
 @click.group()
 def main():
-    """AI Value Assessment - Audit your Bedrock AI spend."""
+    """AI Value Assessment - Audit your AI spend."""
     pass
 
 
@@ -34,13 +35,16 @@ def main():
 @click.option("--output", default="report", help="Output file path (without extension)")
 @click.option("--format", "fmt", default="all", type=click.Choice(["html", "md", "json", "both", "all"]), help="Output format (all = html+md+json)")
 @click.option("--model", default="us.anthropic.claude-sonnet-4-6", help="Bedrock model ID (inference profile) for classification")
+@click.option("--source", default="bedrock", type=click.Choice(["bedrock", "otlp"]), help="Log source format: bedrock (Model Invocation Logs) or otlp (OpenTelemetry JSON)")
 @click.option("--skip-preflight", is_flag=True, default=False, help="Skip credential/bucket/model access checks (not recommended)")
 @click.option("--db", default=None, help="Path to the local SQLite store (default: a temp file, deleted after the run)")
 @click.option("--max-use-cases", default=50, type=int, help="Cap on named use cases (Pass 2b calls); overflow rolls into one 'Other' cluster. Set above your expected use-case count, cost per extra slot is a fraction of a cent")
 @click.option("--show-samples", is_flag=True, default=False, help="Include raw prompt/response samples in the report (off by default to protect employee privacy)")
-def audit(bucket, prefix, region, days, output, fmt, model, skip_preflight, db, max_use_cases, show_samples):
+def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflight, db, max_use_cases, show_samples):
     """Run a full audit on Model Invocation Logs."""
+    source_label = "OTLP Telemetry" if source == "otlp" else "Bedrock Model Invocation Logs"
     console.print(f"\n[bold]AI Value Assessment Audit[/bold]")
+    console.print(f"  Source: {source_label}")
     console.print(f"  Bucket: s3://{bucket}/{prefix}")
     console.print(f"  Region: {region}")
     console.print(f"  Window: last {days} days")
@@ -48,7 +52,7 @@ def audit(bucket, prefix, region, days, output, fmt, model, skip_preflight, db, 
 
     if not skip_preflight:
         console.print("[0/5] Checking credentials, bucket access, and model access...")
-        if not _run_preflight_and_report(bucket, prefix, region, model):
+        if not _run_preflight_and_report(bucket, prefix, region, model, source):
             sys.exit(1)
         console.print()
 
@@ -65,7 +69,7 @@ def audit(bucket, prefix, region, days, output, fmt, model, skip_preflight, db, 
         cleanup_db = True
 
     try:
-        _run_audit(bucket, prefix, region, days, output, fmt, model, db_path, max_use_cases, show_samples)
+        _run_audit(bucket, prefix, region, days, output, fmt, model, source, db_path, max_use_cases, show_samples)
     finally:
         if cleanup_db:
             for suffix in ("", "-wal", "-shm"):
@@ -75,18 +79,22 @@ def audit(bucket, prefix, region, days, output, fmt, model, skip_preflight, db, 
                     pass
 
 
-def _run_audit(bucket, prefix, region, days, output, fmt, model, db_path, max_use_cases, show_samples):
+def _run_audit(bucket, prefix, region, days, output, fmt, model, source, db_path, max_use_cases, show_samples):
     store = AuditStore(db_path)
     try:
-        _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, max_use_cases, show_samples)
+        _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, source, max_use_cases, show_samples)
     finally:
         store.close()
 
 
-def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, max_use_cases, show_samples):
+def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, source, max_use_cases, show_samples):
     # Step 1: Read logs from S3, streamed into the store in batches.
-    console.print("[1/5] Reading invocation logs from S3...")
-    read_invocation_logs_to_store(store, bucket, prefix, region, days)
+    if source == "otlp":
+        console.print("[1/5] Reading OTLP telemetry logs from S3...")
+        read_otlp_logs_to_store(store, bucket, prefix, region, days)
+    else:
+        console.print("[1/5] Reading invocation logs from S3...")
+        read_invocation_logs_to_store(store, bucket, prefix, region, days)
     light_rows = store.fetch_light_rows()
     console.print(f"  Found {len(light_rows)} invocations")
 
@@ -131,17 +139,18 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
     run_meta = {
         "bucket": bucket, "prefix": prefix, "region": region,
         "window_days": days, "classifier_model": model,
+        "source": source,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     if fmt in ("html", "both", "all"):
         html_path = f"{output}.html"
-        generate_html_report(assessments, html_path, show_samples=show_samples)
+        generate_html_report(assessments, html_path, show_samples=show_samples, source=source)
         console.print(f"  [green]HTML report: {html_path}[/green]")
 
     if fmt in ("md", "both", "all"):
         md_path = f"{output}.md"
-        generate_report(assessments, md_path, show_samples=show_samples)
+        generate_report(assessments, md_path, show_samples=show_samples, source=source)
         console.print(f"  [green]Markdown report: {md_path}[/green]")
 
     if fmt in ("json", "all"):
@@ -156,7 +165,7 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
     console.print()
 
 
-def _run_preflight_and_report(bucket, prefix, region, model):
+def _run_preflight_and_report(bucket, prefix, region, model, source="bedrock"):
     """Run pre-flight checks, print results, return True iff safe to proceed.
 
     Fails fast on credential/bucket/model problems instead of letting them
@@ -165,7 +174,7 @@ def _run_preflight_and_report(bucket, prefix, region, model):
     "Task not identifiable" with no indication that Bedrock access was the
     real problem (model access denied).
     """
-    checks = run_preflight(bucket, prefix, region, model)
+    checks = run_preflight(bucket, prefix, region, model, source=source)
     ok = True
     for c in checks:
         style = _STATUS_STYLE.get(c["status"], "white")

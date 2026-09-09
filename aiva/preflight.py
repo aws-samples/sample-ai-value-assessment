@@ -11,7 +11,7 @@ import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnectionError
 
 
-def run_preflight(bucket, prefix, region, model_id):
+def run_preflight(bucket, prefix, region, model_id, source="bedrock"):
     """Run all checks and return a list of {name, status, detail, hint}.
 
     status is "pass" or "fail". hint is only present on failure and names the
@@ -21,7 +21,7 @@ def run_preflight(bucket, prefix, region, model_id):
     checks = []
 
     identity = _check_credentials(checks)
-    _check_bucket_access(checks, bucket, prefix, region, identity)
+    _check_bucket_access(checks, bucket, prefix, region, identity, source=source)
 
     if identity is None:
         checks.append({
@@ -65,7 +65,7 @@ def _check_credentials(checks):
     return None
 
 
-def _check_bucket_access(checks, bucket, prefix, region, identity):
+def _check_bucket_access(checks, bucket, prefix, region, identity, source="bedrock"):
     """Confirm the log bucket exists, is in the given region, and is listable."""
     if identity is None:
         checks.append({
@@ -133,28 +133,38 @@ def _check_bucket_access(checks, bucket, prefix, region, identity):
         "detail": f"Bucket '{bucket}' is reachable in region '{region}'.",
     })
 
-    log_prefix = f"{prefix}/AWSLogs/"
+    if source == "otlp":
+        log_prefix = f"{prefix}/"
+        check_name = "OTLP logs present"
+        empty_hint = ("This is expected on a brand-new setup. Confirm your OpenTelemetry "
+                      "Collector is writing to this prefix; check --prefix if you expected "
+                      "data immediately.")
+    else:
+        log_prefix = f"{prefix}/AWSLogs/"
+        check_name = "Model Invocation Logs present"
+        empty_hint = ("This is expected on a brand-new setup. Logging takes a few minutes to "
+                      "start appearing after the first Bedrock call; check --prefix if you "
+                      "expected data immediately.")
+
     try:
         resp = s3.list_objects_v2(Bucket=bucket, Prefix=log_prefix, MaxKeys=1)
         if resp.get("KeyCount", 0) > 0:
             checks.append({
-                "name": "Model Invocation Logs present",
+                "name": check_name,
                 "status": "pass",
                 "detail": f"Found log objects under s3://{bucket}/{log_prefix}.",
             })
         else:
             checks.append({
-                "name": "Model Invocation Logs present",
+                "name": check_name,
                 "status": "warn",
                 "detail": f"No log objects found yet under s3://{bucket}/{log_prefix}.",
-                "hint": "This is expected on a brand-new setup. Logging takes a few minutes to "
-                        "start appearing after the first Bedrock call; check --prefix if you "
-                        "expected data immediately.",
+                "hint": empty_hint,
             })
     except ClientError as e:
         code = e.response["Error"].get("Code", "")
         checks.append({
-            "name": "Model Invocation Logs present",
+            "name": check_name,
             "status": "fail",
             "detail": f"Could not list objects under '{log_prefix}': {code}.",
             "hint": "Confirm s3:ListBucket is granted (see docs/iam-policy.json).",

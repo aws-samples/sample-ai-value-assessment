@@ -1,13 +1,14 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  AI Value Assessment, click-to-deploy audit. Reads Bedrock Model Invocation
-  Logs from a source S3 bucket, classifies business use cases, and writes
-  the report to a destination S3 bucket. All compute (CodeBuild) and storage
-  runs inside this AWS account; nothing is read onto a local machine. Deploy
-  the stack and the audit starts automatically. Deploy this stack in the
-  SAME REGION as SourceBucketName - Bedrock model access, IAM policy scope,
-  and Model Invocation Logging are all regional, deploying cross-region is
-  unsupported and will fail pre-flight or IAM checks.
+  AI Value Assessment, click-to-deploy audit. Reads AI usage logs from a
+  source S3 bucket (Bedrock Model Invocation Logs or OpenTelemetry JSON
+  exports), classifies business use cases, and writes the report to a
+  destination S3 bucket. All compute (CodeBuild) and storage runs inside
+  this AWS account; nothing is read onto a local machine. Deploy the stack
+  and the audit starts automatically. Deploy this stack in the SAME REGION
+  as SourceBucketName - Bedrock model access, IAM policy scope, and Model
+  Invocation Logging are all regional, deploying cross-region is unsupported
+  and will fail pre-flight or IAM checks.
 
 Parameters:
   SourceBucketName:
@@ -36,6 +37,16 @@ Parameters:
       Cap on named use cases in the report; overflow rolls into one "Other"
       entry. Raise this if you expect more distinct use cases than the
       default, cost per extra slot is a fraction of a cent.
+  SourceFormat:
+    Type: String
+    Default: bedrock
+    AllowedValues:
+      - bedrock
+      - otlp
+    Description: >-
+      Log source format. "bedrock" reads Bedrock Model Invocation Logs
+      (default). "otlp" reads OpenTelemetry JSON exports (e.g. from Claude
+      Code or Cowork via an OTEL Collector with the awss3 exporter).
   ClassifierModelId:
     Type: String
     Default: us.anthropic.claude-sonnet-4-6
@@ -312,6 +323,7 @@ Resources:
                     --prefix "${SourceBucketPrefix}"
                     --region "${AWS::Region}"
                     --days ${WindowDays}
+                    --source "${SourceFormat}"
                     --model "${ClassifierModelId}"
                     --max-use-cases ${MaxUseCases}
                     --output /tmp/report
