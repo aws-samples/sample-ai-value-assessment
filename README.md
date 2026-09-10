@@ -1,14 +1,17 @@
 # AI Value Assessment
 
-AI Value Assessment reads your Bedrock Model Invocation Logs and produces a
-report that, for each business use case in those logs, recommends whether to
-**STOP**, **REFINE**, or **EXPAND** it, and labels it as a one-off experiment or
-a recurring workflow.
+AI Value Assessment reads your AI usage logs and produces a report that, for
+each business use case in those logs, recommends whether to **STOP**, **REFINE**,
+or **EXPAND** it, and labels it as a one-off experiment or a recurring workflow.
+
+It supports two log source formats:
+- **Bedrock Model Invocation Logs** (default): captures every Bedrock call
+  regardless of source (Claude Code, Codex, Amazon Q Developer, LibreChat, or a
+  plain SDK script).
+- **OpenTelemetry (OTLP) JSON**: captures telemetry from tools like Claude Code
+  and Claude Cowork via an OpenTelemetry Collector writing to S3.
 
 It classifies the business task behind each call, not the tool that made it.
-Model Invocation Logging captures every Bedrock call regardless of source
-(Claude Code, Codex, Amazon Q Developer, LibreChat, or a plain SDK script), so
-the tool works unmodified across all of them.
 
 There are two ways to run it: a CloudFormation stack that runs the audit as a
 CodeBuild job inside your account (recommended), or a local CLI.
@@ -68,6 +71,44 @@ This writes `report.html`, `report.md`, and `report.json`. These contain real
 prompt and response excerpts. Treat them as sensitive: do not commit or share
 them externally. Pass `--db path/to/audit.db` to keep the working store and
 resume an interrupted run.
+
+## Using OTLP sources (Claude Code, Cowork, or any OTLP exporter)
+
+If your OTLP telemetry from Claude Code, Claude Cowork, or any other
+OTLP-compatible tool is already landing in S3 as JSON files, you can audit it
+directly with `--source otlp`.
+
+AIVA expects **OTLP-JSON format** in S3 (the format produced by the OTEL
+Collector's `awss3` exporter with `marshaler: otlp_json`). How you get the data
+into S3 is up to you. For configuration references:
+
+- **Claude Code / Agent SDK:**
+  [Observability docs](https://code.claude.com/docs/en/agent-sdk/observability)
+- **Claude Cowork:**
+  [Monitoring with OpenTelemetry](https://support.claude.com/en/articles/14477985-monitor-claude-cowork-activity-with-opentelemetry)
+
+For richer classification (prompts and tool details in the report), ensure
+`OTEL_LOG_USER_PROMPTS=1` and `OTEL_LOG_TOOL_DETAILS=1` are set on your Claude
+Code sessions. Without these, classification still works from tool names and
+session patterns, but with less detail.
+
+```bash
+aiva audit \
+  --bucket your-telemetry-bucket \
+  --prefix otel-logs \
+  --source otlp \
+  --region us-west-2 \
+  --days 7 \
+  --output report
+```
+
+For CloudFormation, set the **SourceFormat** parameter to `otlp` and point
+**SourceBucketPrefix** at your OTLP prefix.
+
+**Cost estimate note:** OTLP logs do not carry authoritative billing data. Cost
+figures in the report are estimated from token counts and published model
+pricing. They do not reflect negotiated rates, provisioned throughput, or batch
+discounts.
 
 ## Reading the report
 

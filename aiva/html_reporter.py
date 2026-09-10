@@ -351,6 +351,15 @@ _REPORT_STYLE = """
         }
         .no-samples { font-size: 11px; color: #8b949e; }
 
+        .source-caveat {
+            padding: 10px 16px; margin-bottom: 16px; border-radius: 8px;
+            background: #2a2a3e; color: #b0b0c8; font-size: 0.85em;
+        }
+
+        .pii-caveat { color: #d29922; font-size: 11px; }
+
+        .examples-line { margin-top: 6px; }
+
         .footer {
             text-align: center; padding: 24px 0; border-top: 1px solid #21262d;
             color: #8b949e; font-size: 12px; margin-top: 32px;
@@ -385,7 +394,7 @@ def _use_case_id(a):
     return "uc_" + hashlib.sha256(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
-def generate_html_report(assessments, output_path, show_samples=False):
+def generate_html_report(assessments, output_path, show_samples=False, source="bedrock"):
     """Generate a use-case HTML dashboard: Business summary + Technical drill-down.
 
     Each assessment is a de-duplicated business USE CASE that may span several
@@ -432,7 +441,7 @@ def generate_html_report(assessments, output_path, show_samples=False):
         <div class="header">
             <div>
                 <h1>AI Value Assessment</h1>
-                <div class="subtitle">Model Invocation Audit Report</div>
+                <div class="subtitle">{"OTLP Telemetry" if source == "otlp" else "Model Invocation"} Audit Report</div>
             </div>
             <div class="timestamp">Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</div>
         </div>
@@ -468,6 +477,7 @@ def generate_html_report(assessments, output_path, show_samples=False):
             </div>
         </div>
 
+        {'<div class="source-caveat">Data source: OpenTelemetry telemetry. Cost figures are estimated from token counts and published model pricing. They do not reflect negotiated rates, provisioned throughput, or batch discounts.</div>' if source == "otlp" else ""}
         <div class="cost-bar-section">
             <h3>Cost by Recommendation</h3>
             {_render_cost_bar(stop_cost, refine_cost, expand_cost, total_cost)}
@@ -491,7 +501,7 @@ def generate_html_report(assessments, output_path, show_samples=False):
 
         <div class="footer">
             AI Value Assessment v1.0.0 &middot; Data stays in your account &middot; Business view + technical drill-down
-            <br><span style="color:#d29922;font-size:11px;">Note: Example tasks are model-generated paraphrases, not verbatim quotes. Despite de-identification instructions, they may inadvertently contain PII. Review before sharing externally.</span>
+            <br><span class="pii-caveat">Note: Example tasks are model-generated paraphrases, not verbatim quotes. Despite de-identification instructions, they may inadvertently contain PII. Review before sharing externally.</span>
         </div>
     </div>
 
@@ -547,7 +557,7 @@ def _render_use_case(a, show_samples=False):
     examples_html = ""
     if a.get("example_tasks"):
         items = " &middot; ".join(f'"{_escape(e)}"' for e in a["example_tasks"][:3])
-        examples_html = f'<div class="value-line" style="margin-top:6px;"><strong>Examples:</strong> {items}</div>'
+        examples_html = f'<div class="value-line examples-line"><strong>Examples:</strong> {items}</div>'
 
     value_html = f'<div class="value-line">Business value: {_escape(value_line)}</div>' if value_line else ""
 
