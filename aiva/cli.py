@@ -42,7 +42,11 @@ def main():
 @click.option("--show-samples", is_flag=True, default=False, help="Include raw prompt/response samples in the report (off by default to protect employee privacy)")
 def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflight, db, max_use_cases, show_samples):
     """Run a full audit on Model Invocation Logs."""
-    source_label = "OTLP Telemetry" if source == "otlp" else "Bedrock Model Invocation Logs"
+    match source:
+        case "otlp":
+            source_label = "OTLP Telemetry"
+        case _:
+            source_label = "Bedrock Model Invocation Logs"
     console.print(f"\n[bold]AI Value Assessment Audit[/bold]")
     console.print(f"  Source: {source_label}")
     console.print(f"  Bucket: s3://{bucket}/{prefix}")
@@ -89,12 +93,13 @@ def _run_audit(bucket, prefix, region, days, output, fmt, model, source, db_path
 
 def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, source, max_use_cases, show_samples):
     # Step 1: Read logs from S3, streamed into the store in batches.
-    if source == "otlp":
-        console.print("[1/5] Reading OTLP telemetry logs from S3...")
-        read_otlp_logs_to_store(store, bucket, prefix, region, days)
-    else:
-        console.print("[1/5] Reading invocation logs from S3...")
-        read_invocation_logs_to_store(store, bucket, prefix, region, days)
+    match source:
+        case "otlp":
+            console.print("[1/5] Reading OTLP telemetry logs from S3...")
+            read_otlp_logs_to_store(store, bucket, prefix, region, days)
+        case _:
+            console.print("[1/5] Reading invocation logs from S3...")
+            read_invocation_logs_to_store(store, bucket, prefix, region, days)
     light_rows = store.fetch_light_rows()
     console.print(f"  Found {len(light_rows)} invocations")
 
