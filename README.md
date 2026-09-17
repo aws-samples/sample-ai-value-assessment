@@ -110,6 +110,14 @@ figures in the report are estimated from token counts and published model
 pricing. They do not reflect negotiated rates, provisioned throughput, or batch
 discounts.
 
+## Example output
+
+*Example output of a synthetic dataset Financial Services customer*
+
+![Report summary showing use cases, spend breakdown, and recommendations](docs/example-report-summary.png)
+
+![Detailed use case view with cost optimization checks and technical detail](docs/example-report-detail.png)
+
 ## Reading the report
 
 Each use case carries one recommendation:
