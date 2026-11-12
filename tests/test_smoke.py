@@ -1083,3 +1083,20 @@ def test_reporters_survive_non_string_nature(tmp_path):
         generate_html_report([a], str(tmp_path / "r.html"))
         generate_report([a], str(tmp_path / "r.md"))
         assert "Experimental" in (tmp_path / "r.md").read_text()
+
+
+def test_markdown_report_escapes_raw_html(tmp_path):
+    payload = "<img src=x onerror=alert(1)>"
+    a = _assessment(name=payload)
+    for key in ("description", "nature_reasoning", "reasoning", "estimated_monthly_projection"):
+        a[key] = payload
+    a["example_tasks"] = [payload]
+    a["refinement_suggestions"] = [payload]
+    a["cost_optimizations"]["tagging_compliance"]["detail"] = payload
+    a["sessions"][0]["activity"] = payload
+    a["metrics"]["models_used"] = [payload]
+    out = tmp_path / "r.md"
+    generate_report([a], str(out))
+    md = out.read_text()
+    assert "<img" not in md
+    assert md.count("&lt;img src=x onerror=alert(1)&gt;") >= 10

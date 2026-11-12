@@ -1,3 +1,4 @@
+import html
 import json
 from datetime import datetime, timezone
 
@@ -182,6 +183,11 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
         f.write("\n".join(lines))
 
 
+def _md(text):
+    """Escape log/model text so a Markdown renderer never sees it as raw HTML."""
+    return html.escape(str(text or ""), quote=False)
+
+
 def _nature(a):
     nature = a.get("nature")
     return nature if nature in ("experimental", "repeatable") else "experimental"
@@ -191,19 +197,19 @@ def _write_business(lines, a):
     """Business-facing entry: use case, value, verdict, cost. No jargon."""
     m = a["metrics"]
     nature = _nature(a).capitalize()
-    lines.append(f"#### {a['name']}  ·  {nature}")
-    lines.append(f"\n{a['description']}")
+    lines.append(f"#### {_md(a['name'])}  ·  {nature}")
+    lines.append(f"\n{_md(a['description'])}")
     lines.append(f"\n**Cost:** {format_cost(m)} across "
                  f"{m.get('session_count', 1)} session(s) "
                  f"({m['invocation_count']:,} invocations)")
     if a.get("nature_reasoning"):
-        lines.append(f"\n**Pattern:** {a['nature_reasoning']}")
+        lines.append(f"\n**Pattern:** {_md(a['nature_reasoning'])}")
     if a.get("example_tasks"):
-        examples = " | ".join(f'"{e}"' for e in a["example_tasks"][:3])
+        examples = " | ".join(f'"{_md(e)}"' for e in a["example_tasks"][:3])
         lines.append(f"\n**Examples:** {examples}")
-    lines.append(f"\n**Why:** {a['reasoning']}")
+    lines.append(f"\n**Why:** {_md(a['reasoning'])}")
     if a.get("estimated_monthly_projection"):
-        lines.append(f"\n**If this continues:** {a['estimated_monthly_projection']}")
+        lines.append(f"\n**If this continues:** {_md(a['estimated_monthly_projection'])}")
     lines.append("")
 
 
@@ -211,14 +217,14 @@ def _write_technical(lines, a):
     """Technical entry: cost optimisations + underlying sessions."""
     m = a["metrics"]
     nature = _nature(a).capitalize()
-    lines.append(f"### {a['name']}  ·  {a['recommendation']}  ·  {nature}")
+    lines.append(f"### {_md(a['name'])}  ·  {_md(a['recommendation'])}  ·  {nature}")
     lines.append(f"\n**Metrics:** {m.get('session_count', 1)} session(s) | "
                  f"{m['invocation_count']:,} invocations | "
                  f"{m['total_input_tokens']:,} input tokens | "
                  f"{m['total_output_tokens']:,} output tokens | "
                  f"{format_cost(m)} | "
                  f"{m['caller_count']} caller(s) | "
-                 f"Models: {', '.join(m['models_used'])}")
+                 f"Models: {_md(', '.join(m['models_used']))}")
 
     opt = a.get("cost_optimizations", {})
     if opt:
@@ -242,21 +248,21 @@ def _write_technical(lines, a):
                 status, detail = "warn", str(check)
             if not detail:
                 continue
-            mark = marks.get(status, "[warn]")
-            lines.append(f"- {mark} **{label}:** {detail}")
+            mark = marks.get(status, "[warn]") if isinstance(status, str) else "[warn]"
+            lines.append(f"- {mark} **{label}:** {_md(detail)}")
 
     if a.get("refinement_suggestions"):
         lines.append("\n**Suggestions:**")
         for s in a["refinement_suggestions"]:
-            lines.append(f"- {s}")
+            lines.append(f"- {_md(s)}")
 
     sessions = a.get("sessions", [])
     if sessions:
         lines.append(f"\n**Underlying sessions ({len(sessions)}):**")
         for s in sessions:
             sm = s["metrics"]
-            lines.append(f"- `{s['session_id']}` {s['activity']}: "
+            lines.append(f"- `{s['session_id']}` {_md(s['activity'])}: "
                          f": ${sm['total_cost_usd']:.2f}, "
-                         f"{sm['invocation_count']} inv, {s.get('duration', '')}".rstrip(", "))
+                         f"{sm['invocation_count']} inv, {_md(s.get('duration', ''))}".rstrip(", "))
 
     lines.append("")
