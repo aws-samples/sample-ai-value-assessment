@@ -887,9 +887,11 @@ def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, audit_nonce=N
 def _parse_json_response(text):
     """Extract a JSON object from a model response. Returns None if none is found.
 
-    Tries, in order: the whole reply, the first object that decodes from any
-    '{' (handles prose before the JSON and ``` inside string values), then a
-    fenced code block.
+    Tries, in order: the whole reply, the first top-level object that decodes
+    from any '{' (handles prose before the JSON and ``` inside string values),
+    then a fenced code block. A '{' with unclosed braces before it is nested
+    inside an object that did not decode (e.g. a reply truncated at
+    max_tokens) and is skipped, so a fragment is never mistaken for the reply.
     """
     text = (text or "").strip()
     try:
@@ -902,12 +904,13 @@ def _parse_json_response(text):
     decoder = json.JSONDecoder()
     start = text.find("{")
     while start >= 0:
-        try:
-            parsed, _ = decoder.raw_decode(text, start)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
+        if text.count("{", 0, start) <= text.count("}", 0, start):
+            try:
+                parsed, _ = decoder.raw_decode(text, start)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
         start = text.find("{", start + 1)
 
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
