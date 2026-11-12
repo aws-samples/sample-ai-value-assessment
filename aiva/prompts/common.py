@@ -1,3 +1,4 @@
+import json
 import secrets
 
 
@@ -18,3 +19,11 @@ def make_nonce():
 def wrap_untrusted(text, nonce, label="UNTRUSTED_DATA"):
     """Fence untrusted log content so it can't be read as instructions."""
     return f"<{label} nonce={nonce}>\n{text}\n</{label} nonce={nonce}>"
+
+
+def untrusted_entry(item_id, fields, nonce, trusted=""):
+    """One listing entry: the trusted id (and code-computed facts) outside the
+    fence, the untrusted fields JSON-encoded inside it, so log text can never
+    break out of its field or forge another id."""
+    head = f"- id: {item_id}" + (f" {trusted}" if trusted else "")
+    return f"{head}\n{wrap_untrusted(json.dumps(fields, ensure_ascii=False), nonce)}"
