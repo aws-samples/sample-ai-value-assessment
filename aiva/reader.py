@@ -342,18 +342,25 @@ def _extract_messages(input_body):
     return messages[-10:] if len(messages) > 10 else messages
 
 
+def _response_blocks(output_body):
+    """Content blocks of a non-streaming response: Anthropic `content`, or Converse `output.message.content`."""
+    content = output_body.get("content")
+    if content is None:
+        output = output_body.get("output")
+        message = output.get("message") if isinstance(output, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
+
+
 def _extract_response_text(output_body):
     """Extract response text from output body (handles streaming event arrays)."""
     if isinstance(output_body, dict):
-        # Non-streaming response
-        content = output_body.get("content", [])
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-            return " ".join(parts)
-        return ""
+        # Non-streaming response. Anthropic blocks are typed; Converse blocks are
+        # keyed by kind ({"text": ...}, {"toolUse": ...}) with no "type".
+        return " ".join(block["text"] for block in _response_blocks(output_body)
+                        if block.get("type", "text") == "text" and isinstance(block.get("text"), str))
 
     if isinstance(output_body, list):
         # Streaming response: array of SSE events
@@ -381,11 +388,13 @@ def _extract_tool_calls(output_body):
     tool names there come from content_block_start, not delta.
     """
     if isinstance(output_body, dict):
-        content = output_body.get("content", [])
-        if isinstance(content, list):
-            return [block.get("name", "unknown") for block in content
-                    if isinstance(block, dict) and block.get("type") == "tool_use"]
-        return []
+        names = []
+        for block in _response_blocks(output_body):
+            if block.get("type") == "tool_use":
+                names.append(block.get("name", "unknown"))
+            elif isinstance(block.get("toolUse"), dict):
+                names.append(block["toolUse"].get("name", "unknown"))
+        return names
 
     if isinstance(output_body, list):
         names = []

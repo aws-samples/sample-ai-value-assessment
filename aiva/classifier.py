@@ -653,6 +653,9 @@ def extract_session_signal(invocations, max_items=12, max_chars=500):
             for b in blocks:
                 if not isinstance(b, dict):
                     continue
+                if isinstance(b.get("toolUse"), dict):
+                    # Converse tool call: same fields as an Anthropic tool_use block.
+                    b = {"type": "tool_use", **b["toolUse"]}
                 btype = b.get("type", "text" if "text" in b else None)
 
                 if btype == "text":

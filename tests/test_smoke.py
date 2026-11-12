@@ -678,3 +678,44 @@ def test_read_log_file_keeps_every_record_in_a_batched_object():
 
     rows = _read_log_file(_S3(), "b", "AWSLogs/1/BedrockModelInvocationLogs/us-west-2/2026/11/01/00/x.json.gz")
     assert len(rows) == 3
+
+
+# ---------------------------------------------------------------------------
+# Reader: Converse and non-Anthropic request / response bodies
+# ---------------------------------------------------------------------------
+
+def _bedrock_log(model, input_body, output_body, operation="InvokeModel"):
+    return {"modelId": model, "operation": operation, "requestId": "r1",
+            "input": {"inputTokenCount": 100, "inputBodyJson": input_body},
+            "output": {"outputTokenCount": 50, "outputBodyJson": output_body}}
+
+
+def test_converse_bodies_populate_prompt_response_and_tool_calls():
+    from aiva.classifier import extract_session_signal
+    from aiva.reader import _normalise_record
+    input_body = {
+        "messages": [
+            {"role": "user", "content": [{"text": "Draft a reply to the customer about the late payout"}]},
+            {"role": "assistant", "content": [{"toolUse": {"toolUseId": "t1", "name": "Bash",
+                                                           "input": {"command": "grep payout ledger.csv"}}}]},
+            {"role": "user", "content": [{"toolResult": {"toolUseId": "t1", "content": [{"text": "bet 123"}]}}]},
+        ],
+        "system": [{"text": "You are a support agent."}, {"text": "Be concise."}],
+        "inferenceConfig": {"maxTokens": 800},
+        "toolConfig": {"tools": [{"toolSpec": {"name": "Bash"}}]},
+    }
+    output_body = {"output": {"message": {"role": "assistant", "content": [
+                       {"text": "Dear customer, your payout was delayed because"},
+                       {"text": "of a bank holiday."},
+                       {"toolUse": {"toolUseId": "t2", "name": "send_email", "input": {}}}]}},
+                   "stopReason": "tool_use", "usage": {"inputTokens": 100, "outputTokens": 50}}
+    record = _normalise_record(_bedrock_log("global.anthropic.claude-sonnet-4-6", input_body, output_body,
+                                            operation="Converse"), None, "b")
+    assert record["system_prompt"] == "You are a support agent. Be concise."
+    assert record["max_tokens"] == 800
+    assert record["tools"] == ["Bash"]
+    assert record["messages"][0]["content"][0]["text"].startswith("Draft a reply")
+    assert record["response_text"] == "Dear customer, your payout was delayed because of a bank holiday."
+    assert record["tool_calls"] == ["send_email"]
+    # Converse toolUse blocks in the message history carry signal too.
+    assert "Bash: grep payout ledger.csv" in extract_session_signal([record])
