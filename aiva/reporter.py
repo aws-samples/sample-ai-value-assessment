@@ -182,10 +182,15 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
         f.write("\n".join(lines))
 
 
+def _nature(a):
+    nature = a.get("nature")
+    return nature if nature in ("experimental", "repeatable") else "experimental"
+
+
 def _write_business(lines, a):
     """Business-facing entry: use case, value, verdict, cost. No jargon."""
     m = a["metrics"]
-    nature = a.get("nature", "experimental").capitalize()
+    nature = _nature(a).capitalize()
     lines.append(f"#### {a['name']}  ·  {nature}")
     lines.append(f"\n{a['description']}")
     lines.append(f"\n**Cost:** {format_cost(m)} across "
@@ -205,7 +210,7 @@ def _write_business(lines, a):
 def _write_technical(lines, a):
     """Technical entry: cost optimisations + underlying sessions."""
     m = a["metrics"]
-    nature = a.get("nature", "experimental").capitalize()
+    nature = _nature(a).capitalize()
     lines.append(f"### {a['name']}  ·  {a['recommendation']}  ·  {nature}")
     lines.append(f"\n**Metrics:** {m.get('session_count', 1)} session(s) | "
                  f"{m['invocation_count']:,} invocations | "
