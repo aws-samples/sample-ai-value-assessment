@@ -727,3 +727,53 @@ def test_otlp_zero_time_falls_back_to_observed_time():
         log = {"timeUnixNano": zero, "observedTimeUnixNano": "1700000000000000000", "attributes": attrs}
         record = _normalise_log_record(log, {"service.name": "claude-code"})
         assert record["timestamp"] == "2023-11-14T22:13:20+00:00", zero
+
+
+class _FakeOtlpS3:
+    """In-memory list_objects_v2 + get_object over {key: bytes}."""
+
+    def __init__(self, objects):
+        from datetime import datetime, timezone
+        self.objects = objects
+        self.now = datetime.now(timezone.utc)
+
+    def get_paginator(self, _name):
+        return self
+
+    def paginate(self, Bucket, Prefix):
+        yield {"Contents": [{"Key": k, "LastModified": self.now} for k in sorted(self.objects) if k.startswith(Prefix)]}
+
+    def get_object(self, Bucket, Key):
+        import io
+        return {"Body": io.BytesIO(self.objects[Key])}
+
+
+def _otlp_export(records, session_id="s1"):
+    return {"resourceLogs": [{"resource": {"attributes": [_otlp_attr("service.name", "claude-code")]},
+                              "scopeLogs": [{"logRecords": [
+                                  _otlp_log_record(attrs=[_otlp_attr("session.id", session_id)] + attrs)
+                                  for attrs in records]}]}]}
+
+
+def _otlp_api_request(model="claude-sonnet-4-6", input_tokens=100):
+    return [_otlp_attr("event.name", "api_request"), _otlp_attr("model", model),
+            _otlp_attr("input_tokens", str(input_tokens), vtype="intValue"),
+            _otlp_attr("output_tokens", "20", vtype="intValue")]
+
+
+def _otlp_rows(monkeypatch, tmp_path, objects):
+    import aiva.otlp_reader as otlp
+    monkeypatch.setattr(otlp.boto3, "client", lambda *a, **k: _FakeOtlpS3(objects))
+    store = AuditStore(str(tmp_path / "audit.db"))
+    otlp.read_otlp_logs_to_store(store, "b", "otel", "us-east-1", 7)
+    rows = store.fetch_light_rows()
+    full = store.fetch_full_invocations([r["id"] for r in rows])
+    store.close()
+    return full
+
+
+def test_otlp_reads_newline_delimited_exports(monkeypatch, tmp_path):
+    # The collector file exporter writes one ExportLogsServiceRequest per line.
+    lines = "\n".join(json.dumps(_otlp_export([_otlp_api_request()], session_id=f"s{i}")) for i in range(2)) + "\n"
+    rows = _otlp_rows(monkeypatch, tmp_path, {"otel/logs.json": lines.encode(), "otel/logs.jsonl": lines.encode()})
+    assert len(rows) == 4

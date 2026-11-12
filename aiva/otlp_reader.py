@@ -16,7 +16,6 @@ ID using the shared pricing module.
 """
 
 import gzip
-import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -24,10 +23,12 @@ from datetime import datetime, timedelta, timezone
 import boto3
 
 from aiva.pricing import estimate_cost
-from aiva.reader import s3_key_prefix
+from aiva.reader import _iter_json_documents, s3_key_prefix
 
 
 INSERT_BATCH_SIZE = 500
+# .jsonl / .ndjson: file and append-style exporters write one document per line.
+OTLP_SUFFIXES = (".json", ".jsonl", ".ndjson", ".gz")
 
 
 def read_otlp_logs_to_store(store, bucket, prefix, region, days, since=None):
@@ -56,7 +57,7 @@ def read_otlp_logs_to_store(store, bucket, prefix, region, days, since=None):
             if last_modified <= cutoff:
                 continue
             key = obj["Key"]
-            if not (key.endswith(".json") or key.endswith(".json.gz") or key.endswith(".gz")):
+            if not key.endswith(OTLP_SUFFIXES):
                 continue
             wanted.append((key, last_modified))
 
@@ -117,14 +118,17 @@ def _read_otlp_file(s3, bucket, key):
     if key.endswith(".gz"):
         body = gzip.decompress(body)
 
-    try:
-        raw = json.loads(body.decode("utf-8"))
-    except json.JSONDecodeError:
-        return []
+    # Exporters that append (file exporters, some S3 sinks) write several
+    # OTLP documents per object, one per line. Parse each one.
+    records = []
+    for raw in _iter_json_documents(body.decode("utf-8")):
+        if isinstance(raw, dict):
+            records.extend(_records_from_document(raw))
+    return records
 
-    if not isinstance(raw, dict):
-        return []
 
+def _records_from_document(raw):
+    """Normalised records from one OTLP-JSON document (resourceLogs, else resourceSpans)."""
     records = []
 
     if "resourceLogs" in raw:
