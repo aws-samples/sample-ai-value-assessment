@@ -7,7 +7,7 @@ import boto3
 from botocore.config import Config
 
 from aiva.pricing import get_pricing
-from aiva.prompts.common import make_nonce
+from aiva.prompts.common import make_nonce, untrusted_entry
 from aiva.prompts.pass1_describe import Pass1DescribePrompt
 from aiva.prompts.pass2a_cluster import Pass2aClusterPrompt
 from aiva.prompts.pass2a_merge import Pass2aMergePrompt
@@ -25,6 +25,9 @@ CATEGORIES = ("coding", "non_coding")
 NATURES = ("experimental", "repeatable")
 CONFIDENCES = ("high", "medium", "low")
 CHECK_STATUSES = ("pass", "warn", "fail")
+
+# EXPAND needs log-provable recurrence (see _apply_verdict_rubric).
+EXPAND_MIN_SESSIONS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -269,14 +272,13 @@ def _cluster_activities(bedrock, activities, model_id):
         return []
 
     nonce = make_nonce()
-    listing = []
-    for a in activities:
-        listing.append(
-            f'- id="{a["session_id"]}" activity="{a["activity"]}" '
-            f'desc="{a["description"]}" cost=${a["metrics"]["total_cost_usd"]:.2f}'
-        )
+    listing = [
+        untrusted_entry(a["session_id"], {"activity": a["activity"], "desc": a["description"]},
+                        nonce, trusted=f'cost=${a["metrics"]["total_cost_usd"]:.2f}')
+        for a in activities
+    ]
 
-    prompt = _pass2a.build_prompt(nonce=nonce, listing=listing)
+    prompt = _pass2a.build_prompt(listing=listing)
 
     parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
     use_cases = _as_dict_list(parsed.get("use_cases"))
@@ -428,14 +430,14 @@ def _merge_one_batch(bedrock, chunk_clusters, model_id):
     the safe response-size bound, this function never checks or degrades.
     """
     nonce = make_nonce()
-    listing = []
-    for i, c in enumerate(chunk_clusters):
-        listing.append(
-            f'- id="cluster_{i}" name="{c["name"]}" desc="{c["description"]}" '
-            f'sessions={c["metrics"]["session_count"]} cost=${c["metrics"]["total_cost_usd"]:.2f}'
-        )
+    listing = [
+        untrusted_entry(f"cluster_{i}", {"name": c["name"], "desc": c["description"]}, nonce,
+                        trusted=(f'sessions={c["metrics"]["session_count"]} '
+                                 f'cost=${c["metrics"]["total_cost_usd"]:.2f}'))
+        for i, c in enumerate(chunk_clusters)
+    ]
 
-    prompt = _pass2a_merge.build_prompt(nonce=nonce, listing=listing)
+    prompt = _pass2a_merge.build_prompt(listing=listing)
 
     parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
     merged = _as_dict_list(parsed.get("merged"))
@@ -483,7 +485,7 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
     projected_monthly = project_monthly_cost(m["total_cost_usd"], window_days)
 
     prompt = _pass2b.build_prompt(
-        cluster_name=cluster['name'], cluster_description=cluster['description'],
+        nonce=make_nonce(), cluster_name=cluster['name'], cluster_description=cluster['description'],
         sample_activities=sample_activities, metrics=m,
         projected_monthly=projected_monthly, window_days=window_days,
     )
@@ -623,7 +625,12 @@ def _apply_verdict_rubric(llm_reco, cluster, cost_opts, parsed):
     high_confidence = any(s.get("confidence") == "high" for s in sessions)
     repeatable_at_scale = (parsed.get("nature") == "repeatable"
                            and m.get("invocation_count", 0) >= 10)
-    if (not has_fail) and high_confidence and repeatable_at_scale and llm_reco == "EXPAND":
+    # nature, confidence and llm_reco all come from model output that logged
+    # (untrusted) prompts can steer, so EXPAND also needs recurrence the logs
+    # prove: the work showed up in several separate sessions.
+    recurs_in_logs = m.get("session_count", 0) >= EXPAND_MIN_SESSIONS
+    if ((not has_fail) and high_confidence and repeatable_at_scale and recurs_in_logs
+            and llm_reco == "EXPAND"):
         return "EXPAND", ("Clear value, efficient, and a recurring workflow at scale - "
                           "worth scaling.")
 
@@ -633,7 +640,8 @@ def _apply_verdict_rubric(llm_reco, cluster, cost_opts, parsed):
         return "REFINE", f"Real value but has open cost findings: {', '.join(fails)}."
     if llm_reco == "EXPAND":
         return "REFINE", ("Valuable, but does not yet clear the EXPAND bar "
-                          "(needs high-confidence value + recurring scale + no open findings).")
+                          "(needs high-confidence value + recurring scale across "
+                          f"{EXPAND_MIN_SESSIONS}+ sessions + no open findings).")
     return "REFINE", "Real value with room to improve efficiency."
 
 
