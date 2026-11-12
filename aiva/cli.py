@@ -125,8 +125,16 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
     if audit_count:
         console.print(f"  Separated {audit_count} audit overhead calls (${audit_cost:.3f})")
 
+    run_meta = {
+        "bucket": bucket, "prefix": prefix, "region": region,
+        "window_days": days, "classifier_model": model,
+        "source": source,
+    }
+
     if not light_rows:
+        # Still write the (empty) reports: the CloudFormation post_build uploads all three.
         console.print("\n[yellow]No invocations found. Logging may need more time to accumulate data.[/yellow]")
+        _write_reports([], output, fmt, run_meta, show_samples, source)
         return
 
     # Step 2: Group into sessions. Sessions carry invocation_ids, not full
@@ -158,14 +166,17 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
 
     # Step 5: Generate report
     console.print("[5/5] Generating report...")
+    _write_reports(assessments, output, fmt, run_meta, show_samples, source)
 
-    run_meta = {
-        "bucket": bucket, "prefix": prefix, "region": region,
-        "window_days": days, "classifier_model": model,
-        "source": source,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    # Show audit overhead
+    if audit_count:
+        console.print(f"\n  [dim]Audit overhead: {audit_count} calls, ${audit_cost:.3f}[/dim]")
 
+    console.print()
+
+
+def _write_reports(assessments, output, fmt, run_meta, show_samples, source):
+    run_meta = {**run_meta, "generated_at": datetime.now(timezone.utc).isoformat()}
     if fmt in ("html", "both", "all"):
         html_path = f"{output}.html"
         generate_html_report(assessments, html_path, show_samples=show_samples, source=source)
@@ -180,12 +191,6 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
         json_path = f"{output}.json"
         generate_json_report(assessments, json_path, meta=run_meta, show_samples=show_samples)
         console.print(f"  [green]JSON report: {json_path}[/green]")
-
-    # Show audit overhead
-    if audit_count:
-        console.print(f"\n  [dim]Audit overhead: {audit_count} calls, ${audit_cost:.3f}[/dim]")
-
-    console.print()
 
 
 def _run_preflight_and_report(bucket, prefix, region, model, source="bedrock"):

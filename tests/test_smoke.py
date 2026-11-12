@@ -803,3 +803,18 @@ def test_read_skips_bad_objects_and_records_and_reports_them(monkeypatch, tmp_pa
     out = capsys.readouterr().out
     assert "Skipped 2 unreadable log object(s) and 1 malformed record(s)" in out
     assert "First error: " in out
+
+
+def test_zero_invocations_still_writes_every_report_the_buildspec_uploads(monkeypatch, tmp_path):
+    import re
+    import aiva.cli as cli
+    monkeypatch.setattr(cli, "read_invocation_logs_to_store", lambda *a, **k: None)
+    store = AuditStore(str(tmp_path / "a.db"))
+    out = tmp_path / "report"
+    cli._run_audit_with_store(store, "b", "logs", "us-west-2", 7, str(out), "all", "m", "bedrock", 50, False)
+    store.close()
+    uploaded = re.findall(r"aws s3 cp /tmp/report\.(\w+) ", _template_text())
+    assert sorted(uploaded) == ["html", "json", "md"]
+    for ext in uploaded:
+        assert (tmp_path / f"report.{ext}").stat().st_size > 0, ext
+    assert json.loads((tmp_path / "report.json").read_text())
