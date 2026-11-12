@@ -386,6 +386,12 @@ def _escape(text):
     return html_lib.escape(str(text))
 
 
+def _allowed(value, choices, default):
+    """Map a (possibly model-controlled) value onto a fixed set of CSS class names."""
+    value = value.strip().lower() if isinstance(value, str) else ""
+    return value if value in choices else default
+
+
 def _use_case_id(a):
     """Stable id for a use case, derived from its name.
 
@@ -438,7 +444,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'sha256-{_REPORT_STYLE_CSP_HASH}'; script-src 'sha256-{_REPORT_SCRIPT_CSP_HASH}'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; form-action 'none'; base-uri 'none'; style-src 'sha256-{_REPORT_STYLE_CSP_HASH}'; script-src 'sha256-{_REPORT_SCRIPT_CSP_HASH}'">
     <title>AI Value Assessment Audit Report</title>
     <style>{_REPORT_STYLE}</style>
 </head>
@@ -527,14 +533,15 @@ def _render_use_case_list(assessments, show_samples=False):
 def _render_use_case(a, show_samples=False):
     """One use case: business summary in the header/body, technical view on expand."""
     m = a["metrics"]
-    rec = a["recommendation"].lower()
-    rec_label = _escape(a["recommendation"].replace("_", " "))
+    rec = _allowed(a.get("recommendation"), ("stop", "refine", "expand", "not_assessed"),
+                   "not_assessed")
+    rec_label = rec.upper().replace("_", " ")
     name = a.get("name", "Unnamed use case")
     description = a.get("description", "")
     reasoning = a.get("reasoning", "")
     verdict_reason = a.get("verdict_reason", "")
     session_count = m.get("session_count", 1)
-    nature = a.get("nature", "experimental").lower()
+    nature = _allowed(a.get("nature"), ("experimental", "repeatable"), "experimental")
     nature_reasoning = a.get("nature_reasoning", "")
 
     # Surface likely shadow IT: a recurring workflow flagged in its reasoning
@@ -578,7 +585,7 @@ def _render_use_case(a, show_samples=False):
     return f"""
     <div class="use-case" data-category="{category}" data-id="{uc_id}">
         <div class="use-case-header">
-            <span><span class="severity-badge {rec}">{rec_label}</span><span class="nature-badge {nature}">{_escape(nature)}</span>{category_badge}</span>
+            <span><span class="severity-badge {rec}">{rec_label}</span><span class="nature-badge {nature}">{nature}</span>{category_badge}</span>
             <span class="uc-title">{_escape(name)}<span class="uc-desc">{_escape(description)}</span></span>
             <span class="uc-meta">{session_count} session(s)<br>{m['invocation_count']:,} calls</span>
             <span class="uc-cost">{_escape(format_cost(m))}</span>
@@ -650,7 +657,7 @@ def _render_cost_checks(a):
         if not detail:
             continue
 
-        status = status if status in icons else "warn"
+        status = _allowed(status, icons, "warn")
         items.append(f'''<div class="check-item">
             <span class="check-icon {status}">{icons[status]}</span>
             <span class="check-label">{label}</span>
