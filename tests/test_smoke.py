@@ -709,3 +709,16 @@ def test_template_derives_model_from_region_unless_set():
     assert '--model "${ClassifierModelId}"\n' not in text
     assert 'HasClassifierModelId: !Not [!Equals [!Ref ClassifierModelId, ""]]' in text
     assert re.search(r"ModelArg: !If\n\s+- HasClassifierModelId\n\s+- !Sub '--model \"\$\{ClassifierModelId\}\"'\n\s+- \"\"", text)
+
+
+def test_template_grants_kms_decrypt_only_on_the_given_key_via_s3():
+    import re
+    text = _template_text()
+    param = re.search(r"\n  SourceBucketKmsKeyArn:\n(.*?)\n  \w", text, re.S).group(1)
+    assert 'Default: ""' in param
+    assert 'HasSourceBucketKmsKeyArn: !Not [!Equals [!Ref SourceBucketKmsKeyArn, ""]]' in text
+    role = re.search(r"\n  AuditProjectRole:\n(.*?)\n  \w", text, re.S).group(1)
+    grant = re.search(r"- !If\n\s+- HasSourceBucketKmsKeyArn\n(.*?)- !Ref AWS::NoValue", role, re.S).group(1)
+    assert re.search(r"Action:\n\s+- kms:Decrypt\n\s+Resource: !Ref SourceBucketKmsKeyArn\n", grant)
+    assert 'kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"' in grant
+    assert role.count("kms:") == 2 and "Principal: \"*\"" not in role

@@ -50,6 +50,11 @@ In the CloudFormation console, create a stack and upload
    **DestinationBucketName**, or leave it blank to have one generated.
    **ClassifierModelId** left blank uses the Sonnet 4.6 inference profile for
    the stack's region (see the Local CLI `--model` default below).
+   If the log bucket uses SSE-KMS with a customer managed key, set
+   **SourceBucketKmsKeyArn** to that key's ARN. The role then gets
+   `kms:Decrypt` on that key only, and only through S3 in this region. The key
+   policy must also allow the account to delegate key use to IAM (the default
+   key policy does), or name the role directly.
 3. Optionally set **ReportReaderPrincipalArn** to the single IAM identity that
    may read the report. The report contains real prompt and response excerpts.
    Left blank, any principal in the account can read it. Public access is always

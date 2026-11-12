@@ -23,6 +23,14 @@ Parameters:
     Type: String
     Default: bedrock-logs
     Description: S3 key prefix under SourceBucketName where the logs live.
+  SourceBucketKmsKeyArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[a-zA-Z0-9-]+$"
+    Description: >-
+      Optional. ARN of the customer managed KMS key that encrypts the log
+      objects in SourceBucketName. When set, the audit role gets kms:Decrypt
+      on this key only, and only through S3. Leave blank for SSE-S3 buckets.
   WindowDays:
     Type: Number
     Default: 7
@@ -85,6 +93,7 @@ Conditions:
   HasDestinationBucketName: !Not [!Equals [!Ref DestinationBucketName, ""]]
   HasReportReaderPrincipalArn: !Not [!Equals [!Ref ReportReaderPrincipalArn, ""]]
   HasClassifierModelId: !Not [!Equals [!Ref ClassifierModelId, ""]]
+  HasSourceBucketKmsKeyArn: !Not [!Equals [!Ref SourceBucketKmsKeyArn, ""]]
 
 Resources:
   AccessLogsBucket:
@@ -245,6 +254,21 @@ Resources:
                 Resource:
                   - !Sub "arn:aws:s3:::${SourceBucketName}"
                   - !Sub "arn:aws:s3:::${SourceBucketName}/*"
+        - !If
+          - HasSourceBucketKmsKeyArn
+          - PolicyName: DecryptSourceLogsBucket
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: DecryptSourceLogObjectsViaS3
+                  Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                  Resource: !Ref SourceBucketKmsKeyArn
+                  Condition:
+                    StringEquals:
+                      kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"
+          - !Ref AWS::NoValue
         - PolicyName: WriteDestinationBucket
           PolicyDocument:
             Version: "2012-10-17"
