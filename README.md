@@ -32,7 +32,7 @@ Give this prompt to an AI coding assistant with access to your AWS
 credentials (for example Claude Code or Kiro):
 
 ```text
-Run https://github.com/aws-samples/sample-ai-value-assessment in my AWS account <ACCOUNT_ID>
+Run https://github.com/aws-samples/sample-ai-value-assessment in my AWS account <ACCOUNT_ID>. Use data over the last 7 days.
 ```
 
 ## Deploy with CloudFormation (recommended)
