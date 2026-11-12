@@ -1142,3 +1142,52 @@ def test_classifier_tags_every_call_with_the_run_nonce():
                      "m", audit_nonce="abc123")
     _classify_use_case(fake, _build_cluster("A", "a", acts), "m", 7, audit_nonce="abc123")
     assert fake.request_metadata == [tag] * 4
+
+
+def test_store_treats_auditor_role_calls_as_overhead_without_a_known_nonce(tmp_path):
+    # Default temp --db: earlier runs' nonces are gone, so match on the auditor's own role.
+    auditor = "arn:aws:sts::111122223333:assumed-role/AivaAuditor/run-today"
+    store = AuditStore(str(tmp_path / "audit.db"), auditor_arn=auditor)
+    old_run = {"source": "aiva-audit", "aiva_run": "nonce-from-an-earlier-run"}
+    store.insert_invocations([
+        (_record(caller="arn:aws:sts::111122223333:assumed-role/AivaAuditor/run-last-week",
+                 metadata=old_run), "k1", "2026-01-01T00:00:00Z"),
+        (_record(caller="arn:aws:sts::111122223333:assumed-role/ShadowBot/x",
+                 metadata=old_run), "k2", "2026-01-01T00:01:00Z"),
+        (_record(caller="arn:aws:sts::444455556666:assumed-role/AivaAuditor/x",
+                 metadata=old_run), "k3", "2026-01-01T00:02:00Z"),
+        (_record(caller="arn:aws:sts::111122223333:assumed-role/AivaAuditor/human"),
+         "k4", "2026-01-01T00:03:00Z"),
+    ])
+    audited = sorted(r["caller"] for r in store.fetch_light_rows())
+    assert audited == ["arn:aws:sts::111122223333:assumed-role/AivaAuditor/human",
+                       "arn:aws:sts::111122223333:assumed-role/ShadowBot/x",
+                       "arn:aws:sts::444455556666:assumed-role/AivaAuditor/x"]
+    assert store.overhead_summary()[0] == 1
+    store.close()
+
+
+def test_role_identity_normalises_assumed_role_and_role_arns():
+    from aiva.store import role_identity
+    role = "arn:aws:iam::111122223333:role/AivaAuditor"
+    assert role_identity("arn:aws:sts::111122223333:assumed-role/AivaAuditor/sess") == role
+    assert role_identity("arn:aws:iam::111122223333:role/team/path/AivaAuditor") == role
+    assert role_identity("arn:aws:iam::111122223333:user/alice") == "arn:aws:iam::111122223333:user/alice"
+    assert role_identity(None) is None and role_identity("unknown") is None
+
+
+def test_auditor_identity_falls_back_to_none_when_sts_fails(monkeypatch):
+    from aiva import cli
+
+    class _BrokenSts:
+        def get_caller_identity(self):
+            raise RuntimeError("no credentials")
+
+    class _Sts:
+        def get_caller_identity(self):
+            return {"Arn": "arn:aws:sts::1:assumed-role/R/s"}
+
+    monkeypatch.setattr(cli.boto3, "client", lambda *a, **kw: _BrokenSts())
+    assert cli._auditor_identity("us-west-2") is None
+    monkeypatch.setattr(cli.boto3, "client", lambda *a, **kw: _Sts())
+    assert cli._auditor_identity("us-west-2") == "arn:aws:sts::1:assumed-role/R/s"
