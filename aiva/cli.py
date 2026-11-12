@@ -92,6 +92,10 @@ def _run_audit(bucket, prefix, region, days, output, fmt, model, source, db_path
 
 
 def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, source, max_use_cases, show_samples):
+    # Tags this run's own Bedrock calls; only calls with a nonce the store
+    # issued are separated as overhead on a later (resumed) run.
+    audit_nonce = store.issue_audit_nonce()
+
     # Step 1: Read logs from S3, streamed into the store in batches.
     match source:
         case "otlp":
@@ -122,7 +126,7 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
     # Each worker fetches only its own session's full payload from the
     # store, classifies, then releases it, see classifier.classify_activities.
     console.print("[3/5] Identifying the business task behind each session...")
-    activities = classify_activities(store, sessions, region, model)
+    activities = classify_activities(store, sessions, region, model, audit_nonce=audit_nonce)
     console.print(f"  Described {len(activities)} activities")
     failed_sessions = sum(1 for a in activities if a.get("classification_error"))
     if failed_sessions:
@@ -131,7 +135,7 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
 
     # Step 4: Pass 2a + 2b - cluster into use cases, then classify each
     console.print("[4/5] Clustering activities into distinct use cases...")
-    clusters = cluster_use_cases(activities, region, model)
+    clusters = cluster_use_cases(activities, region, model, audit_nonce=audit_nonce)
     console.print(f"  Merged {len(activities)} activities into {len(clusters)} use cases")
 
     if len(clusters) > max_use_cases:
@@ -145,7 +149,8 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
     observed_days = _observed_days(light_rows, days)
     console.print(f"      Classifying use cases (STOP / REFINE / EXPAND), "
                   f"projecting from {observed_days} observed day(s)...")
-    assessments = classify_use_cases(clusters, region, model, window_days=observed_days)
+    assessments = classify_use_cases(clusters, region, model, window_days=observed_days,
+                                     audit_nonce=audit_nonce)
     not_assessed = sum(1 for a in assessments if a["recommendation"] == NOT_ASSESSED)
     if not_assessed:
         console.print(f"  [yellow]{not_assessed} use case(s) not assessed (classification failed); "
