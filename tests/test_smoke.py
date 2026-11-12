@@ -640,3 +640,26 @@ def test_read_log_file_returns_every_record_in_object():
 
     records = _read_log_file(_S3(), "b", "k.json.gz")
     assert [r["request_id"] for r in records] == ["r0", "r1", "r2"]
+
+
+def test_read_log_file_keeps_every_record_in_a_batched_object():
+    # Model Invocation Logging writes several records per object; each must survive.
+    import gzip
+    import io
+    import json
+    from aiva.reader import _read_log_file
+
+    def record(i):
+        return {"timestamp": f"2026-11-01T00:00:0{i}Z", "requestId": str(i),
+                "modelId": "global.anthropic.claude-sonnet-4-6",
+                "input": {"inputTokenCount": 10, "inputBodyJson": {"messages": []}},
+                "output": {"outputTokenCount": 5, "outputBodyJson": {}}}
+
+    body = gzip.compress("\n".join(json.dumps(record(i)) for i in range(3)).encode())
+
+    class _S3:
+        def get_object(self, Bucket, Key):
+            return {"Body": io.BytesIO(body)}
+
+    rows = _read_log_file(_S3(), "b", "AWSLogs/1/BedrockModelInvocationLogs/us-west-2/2026/11/01/00/x.json.gz")
+    assert len(rows) == 3
