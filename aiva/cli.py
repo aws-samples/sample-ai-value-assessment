@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 
+import boto3
 import click
 from rich.console import Console
 
@@ -83,8 +84,24 @@ def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflig
                     pass
 
 
+def _auditor_identity(region):
+    """ARN of the identity running this audit, or None if STS is unavailable.
+
+    Lets earlier runs' calls (whose nonces died with their temp store) be
+    separated as overhead. None falls back to nonce-only matching.
+    """
+    try:
+        return boto3.client("sts", region_name=region).get_caller_identity()["Arn"]
+    except Exception:
+        return None
+
+
 def _run_audit(bucket, prefix, region, days, output, fmt, model, source, db_path, max_use_cases, show_samples):
-    store = AuditStore(db_path)
+    auditor_arn = _auditor_identity(region)
+    if auditor_arn is None:
+        console.print("  [dim]Could not read the caller identity; only this store's own audit "
+                      "calls will be separated as overhead[/dim]")
+    store = AuditStore(db_path, auditor_arn=auditor_arn)
     try:
         _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, source, max_use_cases, show_samples)
     finally:

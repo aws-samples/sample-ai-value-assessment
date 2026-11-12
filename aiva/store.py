@@ -74,8 +74,11 @@ class AuditStore:
     threads; call get_connection() from each thread and it will lazily open
     (and cache) a thread-local connection to the same file."""
 
-    def __init__(self, path):
+    def __init__(self, path, auditor_arn=None):
+        """auditor_arn: the identity running this audit (STS caller ARN), or
+        None if unknown. See _is_audit_overhead."""
         self.path = path
+        self.auditor = role_identity(auditor_arn)
         self._local = threading.local()
         conn = self._connect()
         conn.execute("PRAGMA journal_mode=WAL")
@@ -126,7 +129,7 @@ class AuditStore:
         """
         conn = self._connect()
         nonces = {row[0] for row in conn.execute("SELECT nonce FROM audit_nonces")}
-        rows = [_to_row(record, s3_key, last_modified, nonces)
+        rows = [_to_row(record, s3_key, last_modified, nonces, self.auditor)
                 for record, s3_key, last_modified in items]
         conn.executemany(
             "INSERT OR IGNORE INTO invocations (s3_key, last_modified, timestamp, model, "
@@ -143,7 +146,8 @@ class AuditStore:
 
         The classifier tags its calls with it (requestMetadata aiva_run). A
         logged call is only treated as audit overhead when its nonce is one
-        this store issued, so a workload cannot hide from the audit by
+        this store issued (or its caller is the auditor, see
+        _is_audit_overhead), so a workload cannot hide from the audit by
         copying the public "aiva-audit" source tag. Persisted so a resumed
         run (same --db) still recognises calls made by earlier runs.
         """
@@ -248,18 +252,44 @@ def _session_key(record):
     return None
 
 
-def _is_audit_overhead(record, nonces):
-    """True only for calls tagged with a nonce this store issued (see issue_audit_nonce).
+def role_identity(arn):
+    """Comparable identity for a caller ARN: an assumed-role session ARN and a
+    role ARN (with or without a path) both map to arn:<p>:iam::<acct>:role/<name>.
+    Anything else is returned as-is; empty or "unknown" maps to None."""
+    if not isinstance(arn, str) or not arn.startswith("arn:"):
+        return None
+    parts = arn.split(":", 5)
+    if len(parts) != 6:
+        return arn
+    _, partition, service, _, account, resource = parts
+    kind, _, rest = resource.partition("/")
+    if service == "sts" and kind == "assumed-role" and rest:
+        name = rest.split("/")[0]
+    elif service == "iam" and kind == "role" and rest:
+        name = rest.split("/")[-1]
+    else:
+        return arn
+    return f"arn:{partition}:iam::{account}:role/{name}"
 
-    A bare or unknown-nonce "aiva-audit" tag stays in the audit: hiding real
-    spend is worse than counting a little of our own.
+
+def _is_audit_overhead(record, nonces, auditor):
+    """True for calls tagged as ours AND provably ours: the nonce is one this
+    store issued (see issue_audit_nonce), or the caller is the identity
+    running this audit (covers earlier runs whose temp store is gone).
+
+    A tag from any other caller stays in the audit: hiding real spend is
+    worse than counting a little of our own. A spoofer would need the
+    auditor's own role.
     """
     md = record.get("metadata")
-    return (isinstance(md, dict) and md.get("source") == AUDIT_SOURCE
-            and md.get("aiva_run") in nonces)
+    if not (isinstance(md, dict) and md.get("source") == AUDIT_SOURCE):
+        return False
+    if md.get("aiva_run") in nonces:
+        return True
+    return auditor is not None and role_identity(record.get("caller")) == auditor
 
 
-def _to_row(record, s3_key, last_modified, nonces):
+def _to_row(record, s3_key, last_modified, nonces, auditor):
     payload = json.dumps({
         "system_prompt": record.get("system_prompt", ""),
         "tools": record.get("tools", []),
@@ -284,7 +314,7 @@ def _to_row(record, s3_key, last_modified, nonces):
         record.get("request_id", ""),
         record.get("max_tokens"),
         _session_key(record),
-        1 if _is_audit_overhead(record, nonces) else 0,
+        1 if _is_audit_overhead(record, nonces, auditor) else 0,
         payload,
     )
 
