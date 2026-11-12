@@ -17,5 +17,5 @@ dev = ["pytest>=8.0.0"]
 [project.scripts]
 aiva = "aiva.cli:main"
 
-[tool.setuptools]
-packages = ["aiva"]
+[tool.setuptools.packages.find]
+include = ["aiva*"]
