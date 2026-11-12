@@ -16,6 +16,25 @@ It classifies the business task behind each call, not the tool that made it.
 There are two ways to run it: a CloudFormation stack that runs the audit as a
 CodeBuild job inside your account (recommended), or a local CLI.
 
+## Example output
+
+*Generated from a synthetic Financial Services dataset.*
+
+![Report header showing total spend, Stop/Refine/Expand counts, and cost by recommendation](docs/example-report-dashboard.png)
+
+![Use case list with a recommendation, description, and spend for each use case](docs/example-report-use-cases.png)
+
+![Expanded use case showing the recommendation rationale, shadow IT signal, spend projection, and cost optimization checks](docs/example-report-detail.png)
+
+## Run with your AI
+
+Give this prompt to an AI coding assistant with access to your AWS
+credentials (for example Claude Code or Kiro):
+
+```text
+Run https://github.com/aws-samples/sample-ai-value-assessment in my AWS account <ACCOUNT_ID>
+```
+
 ## Deploy with CloudFormation (recommended)
 
 The audit runs as a CodeBuild job inside your account and writes the report to
