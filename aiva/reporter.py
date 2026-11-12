@@ -27,6 +27,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
             "sessions_analysed": total_sessions,
             "invocations_analysed": total_invocations,
             "total_estimated_cost_usd": round(total_cost, 4),
+            "unpriced_invocations": _totals(assessments)["unpriced_count"],
             "stop": _rec("STOP"), "refine": _rec("REFINE"), "expand": _rec("EXPAND"),
             "not_assessed": _rec("NOT_ASSESSED"),
             "sessions_not_classified": _failed_sessions(assessments),
@@ -58,6 +59,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
                 "total_cost_usd": round(m.get("total_cost_usd", 0.0), 4),
                 "models_used": m.get("models_used", []),
                 "caller_count": m.get("caller_count", 0),
+                "unpriced_invocation_count": m.get("unpriced_count", 0),
             },
             "samples": [
                 {
@@ -71,6 +73,21 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+
+
+def format_cost(metrics):
+    """Dollar cost, marked partial or unknown when invocations are unpriced."""
+    unpriced = metrics.get("unpriced_count", 0)
+    if unpriced and unpriced >= metrics.get("invocation_count", 0):
+        return "unknown"
+    cost = f"${metrics.get('total_cost_usd', 0.0):.2f}"
+    return f"{cost} (partial, {unpriced:,} unpriced)" if unpriced else cost
+
+
+def _totals(assessments):
+    return {"total_cost_usd": sum(a["metrics"]["total_cost_usd"] for a in assessments),
+            "invocation_count": sum(a["metrics"]["invocation_count"] for a in assessments),
+            "unpriced_count": sum(a["metrics"].get("unpriced_count", 0) for a in assessments)}
 
 
 def _failed_sessions(assessments):
@@ -98,7 +115,7 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
     lines.append(f"| Distinct use cases | {len(assessments)} |")
     lines.append(f"| Sessions analysed | {total_sessions:,} |")
     lines.append(f"| Invocations analysed | {total_invocations:,} |")
-    lines.append(f"| Total estimated cost | ${total_cost:.2f} |")
+    lines.append(f"| Total estimated cost | {format_cost(_totals(assessments))} |")
     lines.append(f"| Recommend STOP | {len(stop)} |")
     lines.append(f"| Recommend REFINE | {len(refine)} |")
     lines.append(f"| Recommend EXPAND | {len(expand)} |")
@@ -171,7 +188,7 @@ def _write_business(lines, a):
     nature = a.get("nature", "experimental").capitalize()
     lines.append(f"#### {a['name']}  ·  {nature}")
     lines.append(f"\n{a['description']}")
-    lines.append(f"\n**Cost:** ${m['total_cost_usd']:.2f} across "
+    lines.append(f"\n**Cost:** {format_cost(m)} across "
                  f"{m.get('session_count', 1)} session(s) "
                  f"({m['invocation_count']:,} invocations)")
     if a.get("nature_reasoning"):
@@ -194,7 +211,7 @@ def _write_technical(lines, a):
                  f"{m['invocation_count']:,} invocations | "
                  f"{m['total_input_tokens']:,} input tokens | "
                  f"{m['total_output_tokens']:,} output tokens | "
-                 f"${m['total_cost_usd']:.2f} | "
+                 f"{format_cost(m)} | "
                  f"{m['caller_count']} caller(s) | "
                  f"Models: {', '.join(m['models_used'])}")
 
