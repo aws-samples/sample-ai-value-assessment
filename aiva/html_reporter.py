@@ -3,6 +3,8 @@ import hashlib
 import html as html_lib
 from datetime import datetime, timezone
 
+from aiva.reporter import format_cost, _totals
+
 # Static, no per-report interpolation (checked: contains no Python f-string
 # placeholders), so its content and CSP hash never change between reports.
 # Kept as a plain string, not an f-string, so brace characters are literal
@@ -453,7 +455,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
         <div class="summary-grid">
             <div class="card">
                 <div class="label">Total Spend</div>
-                <div class="value">${total_cost:.2f}</div>
+                <div class="value">{_escape(format_cost(_totals(assessments)))}</div>
             </div>
             <div class="card">
                 <div class="label">Use Cases</div>
@@ -579,7 +581,7 @@ def _render_use_case(a, show_samples=False):
             <span><span class="severity-badge {rec}">{rec_label}</span><span class="nature-badge {nature}">{_escape(nature)}</span>{category_badge}</span>
             <span class="uc-title">{_escape(name)}<span class="uc-desc">{_escape(description)}</span></span>
             <span class="uc-meta">{session_count} session(s)<br>{m['invocation_count']:,} calls</span>
-            <span class="uc-cost">${m['total_cost_usd']:.2f}</span>
+            <span class="uc-cost">{_escape(format_cost(m))}</span>
             <button class="hide-btn" title="Hide this use case">Hide</button>
             <span class="uc-chevron">&#9654;</span>
         </div>

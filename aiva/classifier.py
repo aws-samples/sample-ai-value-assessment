@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import boto3
 from botocore.config import Config
 
+from aiva.pricing import get_pricing
 from aiva.prompts.common import make_nonce
 from aiva.prompts.pass1_describe import Pass1DescribePrompt
 from aiva.prompts.pass2a_cluster import Pass2aClusterPrompt
@@ -161,6 +162,7 @@ def _describe_activity(bedrock, session, invocations, model_id):
     all_tools = set()
     tagged_count = 0        # invocations carrying requestMetadata (cost attribution)
     guardrail_count = 0     # invocations with a max_tokens cap set
+    unpriced_count = 0      # invocations whose model has no known rate (costed at $0)
 
     for inv in invocations:
         models_used.add(inv.get("model", "unknown"))
@@ -170,6 +172,10 @@ def _describe_activity(bedrock, session, invocations, model_id):
             tagged_count += 1
         if inv.get("max_tokens") is not None:
             guardrail_count += 1
+        # cost_priced is True for a table or source-reported rate (OTLP sets it
+        # only for source-reported cost, so also check the table).
+        if not inv.get("cost_priced") and not get_pricing(inv.get("model") or "unknown")[1]:
+            unpriced_count += 1
         if len(sample_user_messages) < 10:
             for msg in inv.get("messages", []):
                 if isinstance(msg, dict) and msg.get("role") == "user":
@@ -218,7 +224,8 @@ def _describe_activity(bedrock, session, invocations, model_id):
         "confidence": parsed.get("confidence", "low"),
         "caller": session["caller"],
         "duration": _session_duration(session),
-        "metrics": _session_metrics(session, invocations, models_used, tagged_count, guardrail_count),
+        "metrics": _session_metrics(session, invocations, models_used, tagged_count, guardrail_count,
+                                    unpriced_count),
         "samples": _session_samples(invocations, max_samples=5),
     }
 
@@ -293,6 +300,7 @@ def _build_cluster(name, description, members):
     total_invocations = sum(m["metrics"]["invocation_count"] for m in members)
     total_tagged = sum(m["metrics"].get("tagged_count", 0) for m in members)
     total_guardrail = sum(m["metrics"].get("guardrail_count", 0) for m in members)
+    total_unpriced = sum(m["metrics"].get("unpriced_count", 0) for m in members)
     models = sorted({mdl for m in members for mdl in m["metrics"]["models_used"]})
     callers = sorted({m["caller"] for m in members})
 
@@ -310,6 +318,7 @@ def _build_cluster(name, description, members):
             "caller_count": len(callers),
             "tagged_count": total_tagged,
             "guardrail_count": total_guardrail,
+            "unpriced_count": total_unpriced,
         },
     }
 
@@ -500,7 +509,9 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
         "refinement_suggestions": parsed.get("refinement_suggestions", []),
         "cost_optimizations": cost_optimizations,
         "projected_monthly_cost_usd": projected_monthly,
-        "estimated_monthly_projection": _format_projection(projected_monthly, window_days, parsed.get("projection_note", "")),
+        "estimated_monthly_projection": _format_projection(projected_monthly, window_days,
+                                                           parsed.get("projection_note", ""),
+                                                           m.get("unpriced_count", 0)),
         "metrics": cluster["metrics"],
         "sessions": cluster["sessions"],
     }
@@ -522,7 +533,8 @@ def _not_assessed(cluster, projected_monthly, window_days, reason):
         "refinement_suggestions": [],
         "cost_optimizations": {"tagging_compliance": _check_tagging(m), "guardrails": _check_guardrails(m)},
         "projected_monthly_cost_usd": projected_monthly,
-        "estimated_monthly_projection": _format_projection(projected_monthly, window_days, ""),
+        "estimated_monthly_projection": _format_projection(projected_monthly, window_days, "",
+                                                           m.get("unpriced_count", 0)),
         "metrics": m,
         "sessions": cluster["sessions"],
     }
@@ -567,8 +579,10 @@ def _apply_verdict_rubric(llm_reco, cluster, cost_opts, parsed):
         return "STOP", "Task looks deterministic - a script/rule would be cheaper and more reliable than a model."
 
     # 3. Negligible + stale: trivial spend and a single one-off session.
+    #    Spend is not known to be trivial if any invocation is unpriced ($0).
     if (parsed.get("nature") == "experimental"
             and m.get("session_count", 0) <= 1
+            and m.get("unpriced_count", 0) == 0
             and m.get("total_cost_usd", 0.0) < 1.0):
         return "STOP", ("Negligible one-off (single session, trivial spend) - "
                         "not worth managing.")
@@ -628,9 +642,12 @@ def _check_guardrails(metrics):
             "detail": f"All {total} invocations set a max_tokens output cap."}
 
 
-def _format_projection(projected_monthly, window_days, note):
+def _format_projection(projected_monthly, window_days, note, unpriced_count=0):
     """Build the projection string from the deterministic number + LLM note."""
     base = f"~${projected_monthly:.2f}/month (linear projection of observed spend over {window_days} day(s))"
+    if unpriced_count:
+        base += (f". Partial: {unpriced_count} invocation(s) use models with no known rate "
+                 "and are counted as $0")
     note = (note or "").strip()
     if note:
         return f"{base}. {note}"
@@ -644,7 +661,8 @@ def _session_duration(session):
     return ""
 
 
-def _session_metrics(session, invocations, models_used, tagged_count=0, guardrail_count=0):
+def _session_metrics(session, invocations, models_used, tagged_count=0, guardrail_count=0,
+                     unpriced_count=0):
     return {
         "invocation_count": len(invocations),
         "total_input_tokens": sum(inv.get("input_tokens", 0) for inv in invocations),
@@ -653,6 +671,7 @@ def _session_metrics(session, invocations, models_used, tagged_count=0, guardrai
         "models_used": list(models_used),
         "tagged_count": tagged_count,
         "guardrail_count": guardrail_count,
+        "unpriced_count": unpriced_count,
     }
 
 

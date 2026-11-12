@@ -849,3 +849,27 @@ def test_pricing_claude_3_and_opus_4_bedrock_ids():
     # Newer Opus 4.x keeps its own rate, not Opus 4's.
     assert abs(estimate_cost(m, 0, "global.anthropic.claude-opus-4-5-20251101-v1:0")[0] - 5.0) < 1e-6
 
+
+def test_unpriced_invocations_block_trivial_spend_stop(tmp_path):
+    from aiva.classifier import _describe_activity, _classify_use_case
+    llama = [dict(inv, model="meta.llama3-1-70b-instruct-v1:0", cost_priced=False) for inv in _invocations(300)]
+    act = _describe_activity(_FakeBedrock({"activity": "Contract review", "confidence": "high"}),
+                             _session(0, cost=0.0), llama, "m")
+    one_off = {"recommendation": "REFINE", "nature": "experimental", "reasoning": "one-off"}
+    out = _classify_use_case(_FakeBedrock(one_off), _build_cluster("Contract review", "", [act]), "m", 7)
+    assert out["recommendation"] != "STOP"
+    assert "Partial" in out["estimated_monthly_projection"]
+
+    assert act["metrics"]["unpriced_count"] == 300
+    # OTLP marks table-priced cost as cost_priced=False; a known model is still priced.
+    otlp = [dict(inv, cost_priced=False) for inv in _invocations(5)]
+    assert _describe_activity(_FakeBedrock({"activity": "x"}), _session(1), otlp, "m")["metrics"]["unpriced_count"] == 0
+
+    generate_report([out], str(tmp_path / "r.md"))
+    assert "| Total estimated cost | unknown |" in (tmp_path / "r.md").read_text()
+    generate_html_report([out], str(tmp_path / "r.html"))
+    assert '<span class="uc-cost">unknown</span>' in (tmp_path / "r.html").read_text()
+    generate_json_report([out], str(tmp_path / "r.json"))
+    data = json.loads((tmp_path / "r.json").read_text())
+    assert data["summary"]["unpriced_invocations"] == 300
+    assert data["use_cases"][0]["metrics"]["unpriced_invocation_count"] == 300
