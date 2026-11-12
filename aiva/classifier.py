@@ -19,6 +19,13 @@ _pass2a = Pass2aClusterPrompt()
 _pass2a_merge = Pass2aMergePrompt()
 _pass2b = Pass2bClassifyPrompt()
 
+# Allowed values for enum-like fields in model JSON (see _as_choice).
+RECOMMENDATIONS = ("stop", "refine", "expand")
+CATEGORIES = ("coding", "non_coding")
+NATURES = ("experimental", "repeatable")
+CONFIDENCES = ("high", "medium", "low")
+CHECK_STATUSES = ("pass", "warn", "fail")
+
 
 # ---------------------------------------------------------------------------
 # Three-pass semantic classification
@@ -224,10 +231,10 @@ def _describe_activity(bedrock, session, invocations, model_id):
     return {
         "session_id": session["session_id"],
         "classification_error": failed,
-        "activity": parsed.get("activity", "Task not identifiable from logs"),
-        "description": parsed.get("description", ""),
-        "business_value": parsed.get("business_value", ""),
-        "confidence": parsed.get("confidence", "low"),
+        "activity": _as_str(parsed.get("activity")).strip() or "Task not identifiable from logs",
+        "description": _as_str(parsed.get("description")),
+        "business_value": _as_str(parsed.get("business_value")),
+        "confidence": _as_choice(parsed.get("confidence"), CONFIDENCES, "low"),
         "caller": session["caller"],
         "duration": _session_duration(session),
         "metrics": _session_metrics(session, invocations, models_used, tagged_count, guardrail_count,
@@ -272,8 +279,9 @@ def _cluster_activities(bedrock, activities, model_id):
     prompt = _pass2a.build_prompt(nonce=nonce, listing=listing)
 
     parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
-    use_cases = parsed.get("use_cases", [])
+    use_cases = _as_dict_list(parsed.get("use_cases"))
 
+    # Only ids this call issued are accepted; anything else the model returns is dropped.
     by_id = {a["session_id"]: a for a in activities}
     clusters = []
     assigned = set()
@@ -281,14 +289,14 @@ def _cluster_activities(bedrock, activities, model_id):
     for uc in use_cases:
         # First listing wins: an id repeated within or across use cases is
         # placed once, so its cost is counted once.
-        ids = [sid for sid in dict.fromkeys(uc.get("session_ids", []))
+        ids = [sid for sid in dict.fromkeys(_as_str_list(uc.get("session_ids")))
                if sid in by_id and sid not in assigned]
         members = [by_id[sid] for sid in ids]
         if not members:
             continue
         assigned.update(ids)
-        clusters.append(_build_cluster(uc.get("name", "Unnamed use case"),
-                                        uc.get("description", ""), members))
+        clusters.append(_build_cluster(_as_str(uc.get("name")).strip() or "Unnamed use case",
+                                        _as_str(uc.get("description")), members))
 
     # Safety net: any activity the model dropped becomes its own use case
     orphans = [a for a in activities if a["session_id"] not in assigned]
@@ -430,14 +438,15 @@ def _merge_one_batch(bedrock, chunk_clusters, model_id):
     prompt = _pass2a_merge.build_prompt(nonce=nonce, listing=listing)
 
     parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
-    merged = parsed.get("merged", [])
+    merged = _as_dict_list(parsed.get("merged"))
 
+    # Only ids this call issued are accepted; anything else the model returns is dropped.
     by_id = {f"cluster_{i}": c for i, c in enumerate(chunk_clusters)}
     result = []
     assigned = set()
 
     for group in merged:
-        ids = [cid for cid in dict.fromkeys(group.get("cluster_ids", []))
+        ids = [cid for cid in dict.fromkeys(_as_str_list(group.get("cluster_ids")))
                if cid in by_id and cid not in assigned]
         member_clusters = [by_id[cid] for cid in ids]
         if not member_clusters:
@@ -445,8 +454,8 @@ def _merge_one_batch(bedrock, chunk_clusters, model_id):
         assigned.update(ids)
         flattened_members = [s for c in member_clusters for s in c["sessions"]]
         result.append(_build_cluster(
-            group.get("name") or member_clusters[0]["name"],
-            group.get("description") or member_clusters[0]["description"],
+            _as_str(group.get("name")).strip() or member_clusters[0]["name"],
+            _as_str(group.get("description")) or member_clusters[0]["description"],
             flattened_members,
         ))
 
@@ -488,9 +497,10 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
     parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit")
     if parsed is None:
         return _not_assessed(cluster, projected_monthly, window_days, "Pass 2b classification call failed.")
+    parsed = _normalise_pass2b(parsed)
 
     # Objective checks computed in Python from log facts (not LLM prose).
-    cost_optimizations = dict(parsed.get("cost_optimizations", {}))
+    cost_optimizations = parsed["cost_optimizations"]
     cost_optimizations["tagging_compliance"] = _check_tagging(m)
     cost_optimizations["guardrails"] = _check_guardrails(m)
 
@@ -499,7 +509,7 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
     # from saying STOP on a business-value judgement we can't make, and from
     # rubber-stamping everything as REFINE.
     recommendation, verdict_reason = _apply_verdict_rubric(
-        parsed.get("recommendation", "REFINE"), cluster, cost_optimizations, parsed
+        parsed["recommendation"], cluster, cost_optimizations, parsed
     )
 
     return {
@@ -507,16 +517,16 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
         "description": cluster["description"],
         "recommendation": recommendation,
         "verdict_reason": verdict_reason,
-        "category": parsed.get("category", "non_coding"),
-        "nature": parsed.get("nature", "experimental"),
-        "nature_reasoning": parsed.get("nature_reasoning", ""),
-        "reasoning": parsed.get("reasoning", ""),
-        "example_tasks": parsed.get("example_tasks", []),
-        "refinement_suggestions": parsed.get("refinement_suggestions", []),
+        "category": parsed["category"],
+        "nature": parsed["nature"],
+        "nature_reasoning": parsed["nature_reasoning"],
+        "reasoning": parsed["reasoning"],
+        "example_tasks": parsed["example_tasks"],
+        "refinement_suggestions": parsed["refinement_suggestions"],
         "cost_optimizations": cost_optimizations,
         "projected_monthly_cost_usd": projected_monthly,
         "estimated_monthly_projection": _format_projection(projected_monthly, window_days,
-                                                           parsed.get("projection_note", ""),
+                                                           parsed["projection_note"],
                                                            m.get("unpriced_count", 0)),
         "metrics": cluster["metrics"],
         "sessions": cluster["sessions"],
@@ -543,6 +553,21 @@ def _not_assessed(cluster, projected_monthly, window_days, reason):
                                                            m.get("unpriced_count", 0)),
         "metrics": m,
         "sessions": cluster["sessions"],
+    }
+
+
+def _normalise_pass2b(parsed):
+    """Pass 2b model JSON -> fixed shape with safe types and allowlisted enums."""
+    return {
+        "recommendation": _as_choice(parsed.get("recommendation"), RECOMMENDATIONS, "refine").upper(),
+        "category": _as_choice(parsed.get("category"), CATEGORIES, "non_coding"),
+        "nature": _as_choice(parsed.get("nature"), NATURES, "experimental"),
+        "nature_reasoning": _as_str(parsed.get("nature_reasoning")),
+        "reasoning": _as_str(parsed.get("reasoning")),
+        "example_tasks": _as_str_list(parsed.get("example_tasks")),
+        "refinement_suggestions": _as_str_list(parsed.get("refinement_suggestions")),
+        "cost_optimizations": _as_checks(parsed.get("cost_optimizations")),
+        "projection_note": _as_str(parsed.get("projection_note")),
     }
 
 
@@ -846,20 +871,78 @@ def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, tag=None):
 
 
 def _parse_json_response(text):
-    """Extract JSON from a model response, handling markdown code blocks."""
-    text = text.strip()
+    """Extract a JSON object from a model response. Returns None if none is found.
 
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        text = text[start:end]
-
+    Tries, in order: the whole reply, the first object that decodes from any
+    '{' (handles prose before the JSON and ``` inside string values), then a
+    fenced code block.
+    """
+    text = (text or "").strip()
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
     except json.JSONDecodeError:
-        return None
+        pass
+
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start >= 0:
+        try:
+            parsed, _ = decoder.raw_decode(text, start)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        start = text.find("{", start + 1)
+
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if fence:
+        try:
+            parsed = json.loads(fence.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Type normalisation for model JSON. Model output is untrusted: any field may
+# come back null, a list, a number or a dict. Normalise at the parse boundary
+# so nothing downstream (rubric, reporters) has to guess.
+# ---------------------------------------------------------------------------
+
+def _as_str(value, default=""):
+    return value if isinstance(value, str) else default
+
+
+def _as_choice(value, choices, default):
+    value = value.strip().lower() if isinstance(value, str) else ""
+    return value if value in choices else default
+
+
+def _as_str_list(value):
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str) and v.strip()]
+
+
+def _as_dict_list(value):
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+def _as_checks(value):
+    """cost_optimizations -> {key: {"status": pass|warn|fail, "detail": str}}."""
+    if not isinstance(value, dict):
+        return {}
+    checks = {}
+    for key, check in value.items():
+        if isinstance(check, dict):
+            checks[key] = {"status": _as_choice(check.get("status"), CHECK_STATUSES, "warn"),
+                           "detail": _as_str(check.get("detail"))}
+        elif isinstance(check, str):
+            checks[key] = {"status": "warn", "detail": check}
+    return checks

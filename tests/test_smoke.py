@@ -687,12 +687,17 @@ def test_read_log_file_keeps_every_record_in_a_batched_object():
 class _FakeBedrock:
     """Answers converse() with canned responses in order (the last one repeats).
     A str is model text, a dict is JSON-encoded, an Exception is raised, and a
-    ("max_tokens", text) tuple is a truncated response."""
+    ("max_tokens", text) tuple is a truncated response. Records prompts
+    and requestMetadata."""
 
     def __init__(self, *responses):
         self.responses = list(responses)
+        self.prompts = []
+        self.request_metadata = []
 
-    def converse(self, **_kwargs):
+    def converse(self, **kwargs):
+        self.prompts.append(kwargs["messages"][0]["content"][0]["text"])
+        self.request_metadata.append(kwargs.get("requestMetadata"))
         r = self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
         if isinstance(r, Exception):
             raise r
@@ -921,3 +926,75 @@ def test_projection_uses_observed_span_and_window(tmp_path, monkeypatch):
     assert 700 < _projected_total(tmp_path, monkeypatch, start_days_ago=1, hours=24) < 750
     # Reused --db holding 14 days, run with --days 7 (was ~$1440).
     assert 700 < _projected_total(tmp_path, monkeypatch, start_days_ago=14, hours=14 * 24) < 750
+
+
+# ---------------------------------------------------------------------------
+# Untrusted model output: JSON extraction and type normalisation
+# ---------------------------------------------------------------------------
+
+def _pass1_activity(i, activity="Board reporting", description="desc", inv=40):
+    return {
+        "session_id": f"session_{i}", "activity": activity, "description": description,
+        "business_value": "", "confidence": "high", "caller": f"arn:caller{i}",
+        "duration": "", "samples": [],
+        "metrics": {"invocation_count": inv, "total_input_tokens": 100, "total_output_tokens": 10,
+                    "total_cost_usd": 30.0, "models_used": ["m"], "tagged_count": inv,
+                    "guardrail_count": inv},
+    }
+
+
+def test_parse_json_response_handles_fences_in_strings_and_prose_braces():
+    from aiva.classifier import _parse_json_response
+    good = {"activity": "CI debugging", "description": "Fixed a ```yaml``` block"}
+    assert _parse_json_response(json.dumps(good)) == good
+    assert _parse_json_response("```json\n" + json.dumps(good) + "\n```") == good
+    assert _parse_json_response("Classifying {session}: " + json.dumps(good)) == good
+    assert _parse_json_response("[1, 2]") is None
+    assert _parse_json_response("no json here") is None
+
+
+def test_pass2b_survives_wrong_types_from_model():
+    from aiva.classifier import _classify_use_case
+    cluster = _build_cluster("X", "d", [_pass1_activity(0)])
+    for reply in (
+        {"recommendation": None, "cost_optimizations": None, "nature": None, "reasoning": None},
+        {"recommendation": ["EXPAND"], "cost_optimizations": [{"status": "warn"}], "nature": ["repeatable"]},
+        {"recommendation": "REFINE", "cost_optimizations": {"prompt_caching": "warn"},
+         "example_tasks": "Summarise the board pack", "refinement_suggestions": "Use Haiku",
+         "category": 5, "projection_note": {"x": 1}},
+    ):
+        out = _classify_use_case(_FakeBedrock(reply), cluster, "m", 7)
+        assert out["recommendation"] in ("STOP", "REFINE", "EXPAND")
+        assert out["nature"] in ("experimental", "repeatable")
+        assert out["category"] in ("coding", "non_coding")
+        assert isinstance(out["reasoning"], str)
+        assert all(isinstance(v, dict) for v in out["cost_optimizations"].values())
+        assert all(isinstance(e, str) for e in out["example_tasks"])
+        assert all(isinstance(s, str) for s in out["refinement_suggestions"])
+    assert out["example_tasks"] == ["Summarise the board pack"]
+    assert out["refinement_suggestions"] == ["Use Haiku"]
+
+
+def test_pass1_and_pass2a_survive_wrong_types_from_model():
+    from aiva.classifier import _describe_activity, _cluster_activities, _merge_one_batch
+    sess = {"session_id": "session_0", "caller": "a", "first_ts": None, "last_ts": None,
+            "total_cost_usd": 0.0}
+    a = _describe_activity(_FakeBedrock({"activity": None, "description": ["x"], "confidence": 3}),
+                           sess, [], "m")
+    assert isinstance(a["activity"], str) and a["activity"]
+    assert isinstance(a["description"], str)
+    _apply_verdict_rubric("REFINE", _build_cluster("X", "", [a]), {}, {})
+
+    acts = [_pass1_activity(0), _pass1_activity(1)]
+    for reply in ({"use_cases": None}, {"use_cases": "x"},
+                  {"use_cases": ["x", {"session_ids": "session_0"}]},
+                  {"use_cases": [{"name": None, "description": 1,
+                                  "session_ids": ["session_0", "session_1"]}]}):
+        clusters = _cluster_activities(_FakeBedrock(reply), acts, "m")
+        assert sorted(s["session_id"] for c in clusters for s in c["sessions"]) == ["session_0", "session_1"]
+        assert all(isinstance(c["name"], str) and isinstance(c["description"], str) for c in clusters)
+
+    chunk = [_build_cluster("A", "a", [acts[0]]), _build_cluster("B", "b", [acts[1]])]
+    for reply in ({"merged": None}, {"merged": [None, {"cluster_ids": "cluster_0"}]}):
+        merged = _merge_one_batch(_FakeBedrock(reply), chunk, "m")
+        assert sorted(s["session_id"] for c in merged for s in c["sessions"]) == ["session_0", "session_1"]
