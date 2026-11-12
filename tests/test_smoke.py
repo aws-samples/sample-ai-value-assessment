@@ -761,3 +761,45 @@ def test_preflight_reads_a_log_object_and_names_kms_decrypt(monkeypatch):
         checks = {c["name"]: c for c in preflight.run_preflight("b", "logs", "us-west-2", "m")}
         assert checks["Log objects readable"]["status"] == status
     assert "kms:Decrypt" in checks["Log objects readable"]["hint"]
+
+
+def test_read_skips_bad_objects_and_records_and_reports_them(monkeypatch, tmp_path, capsys):
+    import gzip
+    import io
+    from datetime import datetime, timezone
+    import aiva.reader as reader
+
+    def rec(rid, **over):
+        r = {"timestamp": "2026-11-01T00:00:00Z", "requestId": rid, "modelId": "global.anthropic.claude-sonnet-4-6",
+             "input": {"inputTokenCount": 10, "inputBodyJson": {"messages": []}},
+             "output": {"outputTokenCount": 5, "outputBodyJson": {}}}
+        return json.dumps({**r, **over})
+
+    good = gzip.compress("\n".join([rec("ok"), rec("null-output", output=None),
+                                    rec("bad", input={"inputTokenCount": "abc"})]).encode())
+    objects = {"logs/AWSLogs/a.json.gz": good,
+               "logs/AWSLogs/kms.json.gz": _client_error("AccessDenied", "not authorized to perform: kms:Decrypt"),
+               "logs/AWSLogs/plain.json.gz": b'{"not": "gzipped"}'}
+
+    class _S3:
+        def get_paginator(self, _name):
+            return self
+
+        def paginate(self, Bucket, Prefix, Delimiter=None):
+            now = datetime.now(timezone.utc)
+            yield {} if Delimiter else {"Contents": [{"Key": k, "LastModified": now} for k in objects]}
+
+        def get_object(self, Bucket, Key):
+            if isinstance(objects[Key], Exception):
+                raise objects[Key]
+            return {"Body": io.BytesIO(objects[Key])}
+
+    monkeypatch.setattr(reader.boto3, "client", lambda *_a, **_k: _S3())
+    store = AuditStore(str(tmp_path / "a.db"))
+    reader.read_invocation_logs_to_store(store, "b", "logs", "us-west-2", 7)
+    assert sorted(r["request_id"] for r in store.fetch_full_invocations([r["id"] for r in store.fetch_light_rows()])) \
+        == ["null-output", "ok"]
+    store.close()
+    out = capsys.readouterr().out
+    assert "Skipped 2 unreadable log object(s) and 1 malformed record(s)" in out
+    assert "First error: " in out

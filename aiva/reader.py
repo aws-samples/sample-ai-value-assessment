@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from rich.console import Console
 
 from aiva.pricing import estimate_cost
 
@@ -96,11 +97,22 @@ def read_invocation_logs_to_store(store, bucket, prefix, region, days, since=Non
 
     def _fetch(item):
         key, lm = item
-        return _read_log_file(_client(), bucket, key), key, lm
+        errors = []
+        try:
+            return _read_log_file(_client(), bucket, key, errors), errors, key, lm
+        except Exception as e:  # one unreadable object must not abort the whole read
+            return None, [f"{key}: {type(e).__name__}: {e}"], key, lm
 
+    skipped_objects, skipped_records, first_error = 0, 0, None
     max_workers = min(32, max(4, len(wanted)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for records, key, lm in pool.map(_fetch, wanted):
+        for records, errors, key, lm in pool.map(_fetch, wanted):
+            if errors:
+                first_error = first_error or errors[0]
+                if records is None:
+                    skipped_objects += 1
+                else:
+                    skipped_records += len(errors)
             if records:
                 lm_iso = lm.astimezone(timezone.utc).isoformat()
                 # One object can hold several invocations. The first keeps the
@@ -115,6 +127,10 @@ def read_invocation_logs_to_store(store, bucket, prefix, region, days, since=Non
 
     if buffer:
         store.insert_invocations(buffer)
+
+    if first_error:
+        Console().print(f"  Skipped {skipped_objects} unreadable log object(s) and {skipped_records} malformed "
+                        f"record(s). First error: {first_error}", style="yellow", markup=False, soft_wrap=True)
 
     return newest.astimezone(timezone.utc).isoformat() if newest else None
 
@@ -159,13 +175,15 @@ def _coerce_dt(value):
     return dt
 
 
-def _read_log_file(s3, bucket, key):
+def _read_log_file(s3, bucket, key, errors=None):
     """Read and parse one log object into a list of normalised records.
 
     Model Invocation Logging batches several invocations into one object as
     concatenated JSON documents (newline-separated), so a single json.loads
     fails on most busy-hour files. Parse document by document instead.
+    Malformed documents and records are skipped and described in `errors`.
     """
+    errors = [] if errors is None else errors
     response = s3.get_object(Bucket=bucket, Key=key)
     body = response["Body"].read()
 
@@ -173,15 +191,19 @@ def _read_log_file(s3, bucket, key):
         body = gzip.decompress(body)
 
     records = []
-    for raw in _iter_json_documents(body.decode("utf-8")):
+    for raw in _iter_json_documents(body.decode("utf-8"), errors, key):
         for item in raw if isinstance(raw, list) else [raw]:
-            record = _normalise_record(item, s3, bucket)
+            try:
+                record = _normalise_record(item, s3, bucket)
+            except (AttributeError, TypeError, ValueError, KeyError) as e:
+                errors.append(f"{key}: malformed record: {type(e).__name__}: {e}")
+                continue
             if record:
                 records.append(record)
     return records
 
 
-def _iter_json_documents(text):
+def _iter_json_documents(text, errors=None, key=""):
     """Yield each JSON document in `text`, stopping at the first malformed one."""
     decoder = json.JSONDecoder()
     i, n = 0, len(text)
@@ -192,7 +214,9 @@ def _iter_json_documents(text):
             return
         try:
             doc, i = decoder.raw_decode(text, i)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            if errors is not None:
+                errors.append(f"{key}: malformed JSON, rest of object skipped: {e}")
             return
         yield doc
 
@@ -202,14 +226,14 @@ def _normalise_record(raw, s3, bucket):
     if not isinstance(raw, dict):
         return None
 
-    model_id = raw.get("modelId", "unknown")
-    input_section = raw.get("input", {})
-    output_section = raw.get("output", {})
+    model_id = raw.get("modelId") or "unknown"
+    input_section = raw.get("input") or {}
+    output_section = raw.get("output") or {}
 
-    input_tokens = input_section.get("inputTokenCount", 0)
-    output_tokens = output_section.get("outputTokenCount", 0)
-    cache_read_tokens = input_section.get("cacheReadInputTokenCount", 0)
-    cache_write_tokens = input_section.get("cacheWriteInputTokenCount", 0)
+    input_tokens = int(input_section.get("inputTokenCount") or 0)
+    output_tokens = int(output_section.get("outputTokenCount") or 0)
+    cache_read_tokens = int(input_section.get("cacheReadInputTokenCount") or 0)
+    cache_write_tokens = int(input_section.get("cacheWriteInputTokenCount") or 0)
 
     cost, priced = estimate_cost(input_tokens, output_tokens, model_id,
                                   cache_read_tokens, cache_write_tokens)
