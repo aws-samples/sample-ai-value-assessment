@@ -889,3 +889,35 @@ def test_tagging_check_ignores_session_ids_and_reader_keys():
     assert tagging({"source": "my-app"}) == "fail"
     assert tagging({"session_id": "3f1c", "team": "pricing"}) == "pass"
     assert tagging(_build_metadata({"deployment.environment": "prod"}, {"service.name": "claude-code"}, "")) == "pass"
+
+
+def _projected_total(tmp_path, monkeypatch, start_days_ago, hours, days=7):
+    """Run the audit pipeline on hourly $1 rows with stubbed S3 and Bedrock;
+    return the summed monthly projection from the JSON report."""
+    from datetime import datetime, timedelta, timezone
+    from aiva import classifier, cli
+    now = datetime.now(timezone.utc)
+    store = AuditStore(str(tmp_path / f"audit-{start_days_ago}.db"))
+    items = []
+    for h in range(hours):
+        ts = (now - timedelta(days=start_days_ago) + timedelta(hours=h, minutes=30)).isoformat()
+        rec = dict(_record(cost=1.0), timestamp=ts.replace("+00:00", "Z"), metadata={"session_id": f"s{h // 6}"})
+        items.append((rec, f"k{start_days_ago}-{h}", ts))
+    store.insert_invocations(items)
+    monkeypatch.setattr(cli, "read_invocation_logs_to_store", lambda *a, **kw: None)
+    answer = {"activity": "Churn analysis", "confidence": "high", "use_cases": [],
+              "recommendation": "REFINE", "nature": "repeatable", "reasoning": "recurring"}
+    monkeypatch.setattr(classifier.boto3, "client", lambda *a, **kw: _FakeBedrock(answer))
+    out = tmp_path / f"report-{start_days_ago}"
+    cli._run_audit_with_store(store, "b", "p", "us-west-2", days, str(out), "json", "m", "bedrock", 50, False)
+    store.close()
+    data = json.loads((tmp_path / f"report-{start_days_ago}.json").read_text())
+    return sum(u["projected_monthly_cost_usd"] for u in data["use_cases"])
+
+
+def test_projection_uses_observed_span_and_window(tmp_path, monkeypatch):
+    # $1/hour is ~$720/month however long logging has been on.
+    # Logging enabled 1 day ago with the default --days 7 (was ~$103).
+    assert 700 < _projected_total(tmp_path, monkeypatch, start_days_ago=1, hours=24) < 750
+    # Reused --db holding 14 days, run with --days 7 (was ~$1440).
+    assert 700 < _projected_total(tmp_path, monkeypatch, start_days_ago=14, hours=14 * 24) < 750

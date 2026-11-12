@@ -5,7 +5,7 @@ import tempfile
 import click
 from rich.console import Console
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiva.reader import read_invocation_logs_to_store
 from aiva.otlp_reader import read_otlp_logs_to_store
@@ -100,7 +100,8 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
         case _:
             console.print("[1/5] Reading invocation logs from S3...")
             read_invocation_logs_to_store(store, bucket, prefix, region, days)
-    light_rows = store.fetch_light_rows()
+    # A reused --db can hold rows older than this run's window; keep only --days.
+    light_rows = _rows_in_window(store.fetch_light_rows(), days)
     console.print(f"  Found {len(light_rows)} invocations")
 
     audit_count, audit_cost = store.overhead_summary()
@@ -139,8 +140,12 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
         console.print(f"  [yellow]Capped at {max_use_cases}: {overflow} lower-cost use case(s) "
                       f"rolled into 'Other' (raise --max-use-cases to see them individually)[/yellow]")
 
-    console.print("      Classifying use cases (STOP / REFINE / EXPAND)...")
-    assessments = classify_use_cases(clusters, region, model, window_days=days)
+    # Project from the span the data actually covers, not --days: logging
+    # enabled yesterday holds one day of spend, not seven.
+    observed_days = _observed_days(light_rows, days)
+    console.print(f"      Classifying use cases (STOP / REFINE / EXPAND), "
+                  f"projecting from {observed_days} observed day(s)...")
+    assessments = classify_use_cases(clusters, region, model, window_days=observed_days)
     not_assessed = sum(1 for a in assessments if a["recommendation"] == NOT_ASSESSED)
     if not_assessed:
         console.print(f"  [yellow]{not_assessed} use case(s) not assessed (classification failed); "
@@ -151,7 +156,7 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
 
     run_meta = {
         "bucket": bucket, "prefix": prefix, "region": region,
-        "window_days": days, "classifier_model": model,
+        "window_days": days, "observed_days": observed_days, "classifier_model": model,
         "source": source,
         "classification_errors": {"sessions_not_classified": failed_sessions,
                                   "use_cases_not_assessed": not_assessed},
@@ -178,6 +183,36 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
         console.print(f"\n  [dim]Audit overhead: {audit_count} calls, ${audit_cost:.3f}[/dim]")
 
     console.print()
+
+
+def _parse_ts(value):
+    try:
+        ts = datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _rows_in_window(light_rows, days, now=None):
+    """Rows with a timestamp inside the last `days` days. Rows with an
+    unparseable timestamp are kept (no evidence they are outside)."""
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=days)
+    kept = []
+    for r in light_rows:
+        ts = _parse_ts(r.get("timestamp"))
+        if ts is None or ts >= cutoff:
+            kept.append(r)
+    return kept
+
+
+def _observed_days(light_rows, days):
+    """Span the data covers (max - min timestamp), floored at 1 day and
+    capped at `days`. Falls back to `days` when no timestamp parses."""
+    stamps = [ts for ts in (_parse_ts(r.get("timestamp")) for r in light_rows) if ts is not None]
+    if not stamps:
+        return days
+    span = (max(stamps) - min(stamps)).total_seconds() / 86400
+    return round(min(days, max(1.0, span)), 2)
 
 
 def _run_preflight_and_report(bucket, prefix, region, model, source="bedrock"):
