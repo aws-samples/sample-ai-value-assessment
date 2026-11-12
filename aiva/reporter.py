@@ -28,6 +28,8 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
             "invocations_analysed": total_invocations,
             "total_estimated_cost_usd": round(total_cost, 4),
             "stop": _rec("STOP"), "refine": _rec("REFINE"), "expand": _rec("EXPAND"),
+            "not_assessed": _rec("NOT_ASSESSED"),
+            "sessions_not_classified": _failed_sessions(assessments),
         },
         "use_cases": [],
     }
@@ -71,11 +73,16 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
         json.dump(report, f, indent=2)
 
 
+def _failed_sessions(assessments):
+    return sum(1 for a in assessments for s in a.get("sessions", []) if s.get("classification_error"))
+
+
 def generate_report(assessments, output_path, show_samples=False, source="bedrock"):
     """Generate a markdown report: Business view first, Technical view second."""
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]
     expand = [a for a in assessments if a["recommendation"] == "EXPAND"]
+    not_assessed = [a for a in assessments if a["recommendation"] == "NOT_ASSESSED"]
 
     total_cost = sum(a["metrics"]["total_cost_usd"] for a in assessments)
     total_invocations = sum(a["metrics"]["invocation_count"] for a in assessments)
@@ -95,6 +102,11 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
     lines.append(f"| Recommend STOP | {len(stop)} |")
     lines.append(f"| Recommend REFINE | {len(refine)} |")
     lines.append(f"| Recommend EXPAND | {len(expand)} |")
+    if not_assessed:
+        lines.append(f"| Not assessed (classification failed) | {len(not_assessed)} |")
+    failed_sessions = _failed_sessions(assessments)
+    if failed_sessions:
+        lines.append(f"| Sessions not classified (classification failed) | {failed_sessions} |")
     if stop:
         stop_cost = sum(a["metrics"]["total_cost_usd"] for a in stop)
         lines.append(f"| Potential savings (STOP) | ${stop_cost:.2f} |")
@@ -137,6 +149,7 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
     section("STOP - Kill These", stop)
     section("REFINE - Optimise These", refine)
     section("EXPAND - Invest More", expand)
+    section("NOT ASSESSED - Classification Failed, Re-run", not_assessed)
 
     # -------------------------------------------------------------------
     # Technical view

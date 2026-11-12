@@ -678,3 +678,100 @@ def test_read_log_file_keeps_every_record_in_a_batched_object():
 
     rows = _read_log_file(_S3(), "b", "AWSLogs/1/BedrockModelInvocationLogs/us-west-2/2026/11/01/00/x.json.gz")
     assert len(rows) == 3
+
+
+# ---------------------------------------------------------------------------
+# Classifier against a stubbed Bedrock client: no AWS calls
+# ---------------------------------------------------------------------------
+
+class _FakeBedrock:
+    """Answers converse() with canned responses in order (the last one repeats).
+    A str is model text, a dict is JSON-encoded, an Exception is raised, and a
+    ("max_tokens", text) tuple is a truncated response."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+
+    def converse(self, **_kwargs):
+        r = self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
+        if isinstance(r, Exception):
+            raise r
+        stop = "end_turn"
+        if isinstance(r, tuple):
+            stop, r = r
+        text = r if isinstance(r, str) else json.dumps(r)
+        return {"output": {"message": {"content": [{"text": text}]}}, "stopReason": stop}
+
+
+def _throttle():
+    from botocore.exceptions import ClientError
+    return ClientError({"Error": {"Code": "ThrottlingException", "Message": "slow down"}}, "Converse")
+
+
+def _session(i, cost=4.0):
+    return {"session_id": f"session_{i}", "caller": f"arn:caller{i}", "first_ts": None,
+            "last_ts": None, "total_cost_usd": cost}
+
+
+def _invocations(n=12, metadata=None):
+    return [{"model": "us.anthropic.claude-sonnet-4-6", "cost_priced": True, "max_tokens": 4096,
+             "metadata": {"team": "x"} if metadata is None else metadata,
+             "messages": [{"role": "user", "content": "Draft the Q3 customer churn analysis for the board"}],
+             "response_text": "Here is a structured churn analysis with three cohorts and a summary.",
+             "input_tokens": 900, "output_tokens": 400}] * n
+
+
+def test_bedrock_clients_use_adaptive_retries(monkeypatch):
+    from aiva import classifier
+    seen = []
+    monkeypatch.setattr(classifier.boto3, "client", lambda *a, **kw: seen.append(kw) or _FakeBedrock({}))
+    classifier.classify_use_cases([], "us-west-2", "m")
+    classifier.cluster_use_cases([], "us-west-2", "m")
+    assert len(seen) == 2
+    for kw in seen:
+        assert kw["config"].retries == {"mode": "adaptive", "max_attempts": 10}
+
+
+def test_failed_pass1_never_becomes_stop():
+    # Throttling or a refusal used to read as "Task not identifiable", then STOP rule 1.
+    from aiva.classifier import _describe_activity, _classify_use_case
+    reco = {"recommendation": "REFINE", "nature": "repeatable", "reasoning": "recurring analysis"}
+    for failure in (_throttle(), "I can't help classify this content.", ("max_tokens", '{"activity": "Chur')):
+        acts = [_describe_activity(_FakeBedrock(failure), _session(i), _invocations(), "m") for i in range(3)]
+        out = _classify_use_case(_FakeBedrock(reco), _build_cluster("Churn", "", acts), "m", 7)
+        assert out["recommendation"] != "STOP", failure
+        assert all(a.get("classification_error") for a in acts)
+
+    # A real unidentifiable session next to a failed one: STOP rule 1 judges only the real one.
+    unclear = _describe_activity(_FakeBedrock({"activity": "Task not identifiable from logs"}),
+                                 _session(9), _invocations(), "m")
+    failed = _describe_activity(_FakeBedrock(_throttle()), _session(8), _invocations(), "m")
+    assert not unclear.get("classification_error")
+    out = _classify_use_case(_FakeBedrock(reco), _build_cluster("Churn", "", [unclear, failed]), "m", 7)
+    assert out["recommendation"] == "STOP" and "1 session" in out["verdict_reason"]
+
+
+def test_failed_pass2b_is_not_assessed_and_reports_render(tmp_path):
+    from aiva.classifier import _describe_activity, _classify_use_case
+    act = _describe_activity(_FakeBedrock({"activity": "Board churn analysis", "confidence": "high"}),
+                             _session(0, cost=0.2), _invocations(), "m")
+    cluster = _build_cluster("Churn", "", [act])
+    for failure in (_throttle(), "Sorry, I cannot do that.", ("max_tokens", '{"recommendation": "RE')):
+        out = _classify_use_case(_FakeBedrock(failure), cluster, "m", 7)
+        assert out["recommendation"] == "NOT_ASSESSED", failure
+    # A valid but empty answer is still a real (default) verdict, not a failure.
+    assert _classify_use_case(_FakeBedrock({}), cluster, "m", 7)["recommendation"] != "NOT_ASSESSED"
+
+    failed_act = _describe_activity(_FakeBedrock(_throttle()), _session(1), _invocations(), "m")
+    failed_uc = _classify_use_case(_FakeBedrock({"recommendation": "STOP"}),
+                                   _build_cluster("x", "", [failed_act]), "m", 7)
+    assert failed_uc["recommendation"] == "NOT_ASSESSED"
+
+    assessments = [out, failed_uc, _assessment()]
+    generate_html_report(assessments, str(tmp_path / "r.html"))
+    assert "NOT ASSESSED" in (tmp_path / "r.html").read_text()
+    generate_report(assessments, str(tmp_path / "r.md"))
+    assert "Not assessed (classification failed) | 2" in (tmp_path / "r.md").read_text()
+    generate_json_report(assessments, str(tmp_path / "r.json"))
+    summary = json.loads((tmp_path / "r.json").read_text())["summary"]
+    assert summary["not_assessed"] == 2 and summary["sessions_not_classified"] == 1

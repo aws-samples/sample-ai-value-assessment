@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from aiva.reader import read_invocation_logs_to_store
 from aiva.otlp_reader import read_otlp_logs_to_store
-from aiva.classifier import classify_activities, cluster_use_cases, classify_use_cases, cap_use_cases
+from aiva.classifier import classify_activities, cluster_use_cases, classify_use_cases, cap_use_cases, NOT_ASSESSED
 from aiva.reporter import generate_report, generate_json_report
 from aiva.html_reporter import generate_html_report
 from aiva.preflight import run_preflight
@@ -123,6 +123,10 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
     console.print("[3/5] Identifying the business task behind each session...")
     activities = classify_activities(store, sessions, region, model)
     console.print(f"  Described {len(activities)} activities")
+    failed_sessions = sum(1 for a in activities if a.get("classification_error"))
+    if failed_sessions:
+        console.print(f"  [yellow]{failed_sessions} session(s) could not be classified (Bedrock error, "
+                      "refusal or unparseable output); they are excluded from STOP evidence[/yellow]")
 
     # Step 4: Pass 2a + 2b - cluster into use cases, then classify each
     console.print("[4/5] Clustering activities into distinct use cases...")
@@ -137,6 +141,10 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
 
     console.print("      Classifying use cases (STOP / REFINE / EXPAND)...")
     assessments = classify_use_cases(clusters, region, model, window_days=days)
+    not_assessed = sum(1 for a in assessments if a["recommendation"] == NOT_ASSESSED)
+    if not_assessed:
+        console.print(f"  [yellow]{not_assessed} use case(s) not assessed (classification failed); "
+                      "re-run to assess them[/yellow]")
 
     # Step 5: Generate report
     console.print("[5/5] Generating report...")
@@ -145,6 +153,8 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
         "bucket": bucket, "prefix": prefix, "region": region,
         "window_days": days, "classifier_model": model,
         "source": source,
+        "classification_errors": {"sessions_not_classified": failed_sessions,
+                                  "use_cases_not_assessed": not_assessed},
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -3,6 +3,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import boto3
+from botocore.config import Config
 
 from aiva.prompts.common import make_nonce
 from aiva.prompts.pass1_describe import Pass1DescribePrompt
@@ -32,6 +33,20 @@ _pass2b = Pass2bClassifyPrompt()
 
 PASS1_MAX_WORKERS = 8  # Bedrock has account-level TPS/RPM quotas; keep well under them.
 
+# Adaptive retries back off on ThrottlingException instead of failing the call
+# after the default 3 attempts. A call that still fails is reported as not
+# assessed, never as a verdict (see _call_bedrock_json).
+_BEDROCK_CONFIG = Config(retries={"mode": "adaptive", "max_attempts": 10})
+
+# Verdict for a use case the classifier could not assess (Bedrock error,
+# refusal, truncated or unparseable output). Never counted as STOP/REFINE/EXPAND.
+NOT_ASSESSED = "NOT_ASSESSED"
+NOT_ASSESSED_ACTIVITY = "Not assessed (classification call failed)"
+
+
+def _bedrock_client(region):
+    return boto3.client("bedrock-runtime", region_name=region, config=_BEDROCK_CONFIG)
+
 
 def classify_activities(store, sessions, region, model_id):
     """Pass 1: describe the business task behind each session (tool-agnostic).
@@ -56,7 +71,7 @@ def classify_activities(store, sessions, region, model_id):
 
     def _client():
         if not hasattr(_local, "bedrock"):
-            _local.bedrock = boto3.client("bedrock-runtime", region_name=region)
+            _local.bedrock = _bedrock_client(region)
         return _local.bedrock
 
     def _describe(session):
@@ -80,7 +95,7 @@ def cluster_use_cases(activities, region, model_id):
     clustered independently by the same _cluster_activities used below, then
     a second, much smaller pass merges same-meaning clusters across chunks.
     """
-    bedrock = boto3.client("bedrock-runtime", region_name=region)
+    bedrock = _bedrock_client(region)
 
     if len(activities) <= CHUNK_SIZE:
         return _cluster_activities(bedrock, activities, model_id)
@@ -98,7 +113,7 @@ def classify_use_cases(clusters, region, model_id, window_days=7):
     window_days is the observation window the logs cover; used to compute the
     monthly cost projection deterministically in Python (never by the LLM).
     """
-    bedrock = boto3.client("bedrock-runtime", region_name=region)
+    bedrock = _bedrock_client(region)
     return [_classify_use_case(bedrock, c, model_id, window_days) for c in clusters]
 
 
@@ -170,9 +185,13 @@ def _describe_activity(bedrock, session, invocations, model_id):
     )
 
     parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit")
+    failed = parsed is None
+    if failed:
+        parsed = {"activity": NOT_ASSESSED_ACTIVITY}
 
     return {
         "session_id": session["session_id"],
+        "classification_error": failed,
         "activity": parsed.get("activity", "Task not identifiable from logs"),
         "description": parsed.get("description", ""),
         "business_value": parsed.get("business_value", ""),
@@ -219,7 +238,7 @@ def _cluster_activities(bedrock, activities, model_id):
 
     prompt = _pass2a.build_prompt(nonce=nonce, listing=listing)
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit")
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
     use_cases = parsed.get("use_cases", [])
 
     by_id = {a["session_id"]: a for a in activities}
@@ -371,7 +390,7 @@ def _merge_one_batch(bedrock, chunk_clusters, model_id):
 
     prompt = _pass2a_merge.build_prompt(nonce=nonce, listing=listing)
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit")
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
     merged = parsed.get("merged", [])
 
     by_id = {f"cluster_{i}": c for i, c in enumerate(chunk_clusters)}
@@ -420,7 +439,15 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
         projected_monthly=projected_monthly, window_days=window_days,
     )
 
+    # Every session failed Pass 1: nothing to assess, so no Pass 2b call.
+    sessions = cluster["sessions"]
+    if sessions and all(s.get("classification_error") for s in sessions):
+        return _not_assessed(cluster, projected_monthly, window_days,
+                             f"Pass 1 failed for all {len(sessions)} session(s).")
+
     parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit")
+    if parsed is None:
+        return _not_assessed(cluster, projected_monthly, window_days, "Pass 2b classification call failed.")
 
     # Objective checks computed in Python from log facts (not LLM prose).
     cost_optimizations = dict(parsed.get("cost_optimizations", {}))
@@ -454,6 +481,28 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
     }
 
 
+def _not_assessed(cluster, projected_monthly, window_days, reason):
+    """Assessment record for a use case the classifier could not assess."""
+    m = cluster["metrics"]
+    return {
+        "name": cluster["name"],
+        "description": cluster["description"],
+        "recommendation": NOT_ASSESSED,
+        "verdict_reason": f"{reason} Re-run to assess this use case.",
+        "category": "non_coding",
+        "nature": "experimental",
+        "nature_reasoning": "",
+        "reasoning": "",
+        "example_tasks": [],
+        "refinement_suggestions": [],
+        "cost_optimizations": {"tagging_compliance": _check_tagging(m), "guardrails": _check_guardrails(m)},
+        "projected_monthly_cost_usd": projected_monthly,
+        "estimated_monthly_projection": _format_projection(projected_monthly, window_days, ""),
+        "metrics": m,
+        "sessions": cluster["sessions"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Verdict rubric
 #
@@ -478,11 +527,13 @@ def _apply_verdict_rubric(llm_reco, cluster, cost_opts, parsed):
 
     # --- STOP: evidence-based, log-provable only -------------------------
     # 1. Abandoned / no coherent output: every activity came back unidentifiable.
-    identifiable = [s for s in sessions
+    #    Sessions whose Pass 1 call failed are not evidence either way.
+    assessed = [s for s in sessions if not s.get("classification_error")]
+    identifiable = [s for s in assessed
                     if "not identifiable" not in (s.get("activity", "").lower())]
-    if sessions and not identifiable:
+    if assessed and not identifiable:
         return "STOP", ("No identifiable task or usable output across "
-                        f"{len(sessions)} session(s) - looks abandoned or broken.")
+                        f"{len(assessed)} session(s) - looks abandoned or broken.")
 
     # 2. Provably deterministic work the LLM itself flagged (a rule/script fits).
     #    The model signals this by proposing STOP with a deterministic rationale.
@@ -721,7 +772,12 @@ def _extract_real_user_text(content):
 
 
 def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, tag=None):
-    """Invoke Bedrock and parse a JSON response. Returns {} on failure."""
+    """Invoke Bedrock and parse a JSON object response.
+
+    Returns None on failure (API error after retries, truncated output,
+    refusal or prose that is not a JSON object), so callers can tell a failed
+    call apart from a real but empty answer.
+    """
     try:
         kwargs = {
             "modelId": model_id,
@@ -731,10 +787,13 @@ def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, tag=None):
         if tag:
             kwargs["requestMetadata"] = {"source": tag}
         response = bedrock.converse(**kwargs)
+        if response.get("stopReason") == "max_tokens":
+            return None
         text = response["output"]["message"]["content"][0]["text"]
-        return _parse_json_response(text)
+        parsed = _parse_json_response(text)
     except Exception:
-        return {}
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _parse_json_response(text):
@@ -754,4 +813,4 @@ def _parse_json_response(text):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        return {}
+        return None

@@ -215,6 +215,7 @@ _REPORT_STYLE = """
         .severity-badge.stop { background: rgba(248, 81, 73, 0.15); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.3); }
         .severity-badge.refine { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.3); }
         .severity-badge.expand { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3); }
+        .severity-badge.not_assessed { background: rgba(139, 148, 158, 0.15); color: #8b949e; border: 1px solid rgba(139, 148, 158, 0.3); }
         .nature-badge {
             padding: 3px 10px; border-radius: 10px; font-size: 10px; font-weight: 600;
             text-transform: uppercase; letter-spacing: 0.3px; margin-left: 6px;
@@ -408,6 +409,9 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]
     expand = [a for a in assessments if a["recommendation"] == "EXPAND"]
+    not_assessed = [a for a in assessments if a["recommendation"] == "NOT_ASSESSED"]
+    not_assessed_card = (f'<div class="card"><div class="label">Not Assessed</div>'
+                         f'<div class="value">{len(not_assessed)}</div></div>') if not_assessed else ""
 
     total_cost = sum(a["metrics"]["total_cost_usd"] for a in assessments)
     total_invocations = sum(a["metrics"]["invocation_count"] for a in assessments)
@@ -475,6 +479,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
                 <div class="label">Expand</div>
                 <div class="value expand">{len(expand)}</div>
             </div>
+            {not_assessed_card}
         </div>
 
         {'<div class="source-caveat">Data source: OpenTelemetry telemetry. Cost figures are estimated from token counts and published model pricing. They do not reflect negotiated rates, provisioned throughput, or batch discounts.</div>' if source == "otlp" else ""}
@@ -521,6 +526,7 @@ def _render_use_case(a, show_samples=False):
     """One use case: business summary in the header/body, technical view on expand."""
     m = a["metrics"]
     rec = a["recommendation"].lower()
+    rec_label = _escape(a["recommendation"].replace("_", " "))
     name = a.get("name", "Unnamed use case")
     description = a.get("description", "")
     reasoning = a.get("reasoning", "")
@@ -570,7 +576,7 @@ def _render_use_case(a, show_samples=False):
     return f"""
     <div class="use-case" data-category="{category}" data-id="{uc_id}">
         <div class="use-case-header">
-            <span><span class="severity-badge {rec}">{a['recommendation']}</span><span class="nature-badge {nature}">{_escape(nature)}</span>{category_badge}</span>
+            <span><span class="severity-badge {rec}">{rec_label}</span><span class="nature-badge {nature}">{_escape(nature)}</span>{category_badge}</span>
             <span class="uc-title">{_escape(name)}<span class="uc-desc">{_escape(description)}</span></span>
             <span class="uc-meta">{session_count} session(s)<br>{m['invocation_count']:,} calls</span>
             <span class="uc-cost">${m['total_cost_usd']:.2f}</span>
@@ -579,7 +585,7 @@ def _render_use_case(a, show_samples=False):
         </div>
         <div class="use-case-body">
             <div class="biz-summary">
-                <div class="verdict-reason"><strong>Why {a['recommendation']}:</strong> {_escape(verdict_reason)}</div>
+                <div class="verdict-reason"><strong>Why {rec_label}:</strong> {_escape(verdict_reason)}</div>
                 <div class="why">{_escape(reasoning)}</div>
                 {value_html}
                 {examples_html}
