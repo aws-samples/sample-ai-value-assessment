@@ -16,3 +16,4 @@ report.json
 *.report.html
 *.report.md
 *.report.json
+build/

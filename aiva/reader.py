@@ -10,6 +10,7 @@ from aiva.pricing import estimate_cost
 
 
 INSERT_BATCH_SIZE = 500  # bounds how many full payloads are ever resident at once
+MAX_PARTITION_DAYS = 400  # day folders listed at most, for a very old cutoff
 
 
 def s3_key_prefix(prefix, *parts):
@@ -60,19 +61,20 @@ def read_invocation_logs_to_store(store, bucket, prefix, region, days, since=Non
 
     # 1. List phase: collect in-window log keys (cheap, listing only).
     wanted = []  # (key, last_modified)
-    for page in paginator.paginate(Bucket=bucket, Prefix=log_prefix):
-        for obj in page.get("Contents", []):
-            last_modified = obj["LastModified"]
-            # <= so a watermark equal to an object's time doesn't re-read it.
-            if last_modified <= cutoff:
-                continue
-            key = obj["Key"]
-            # Skip permission-check files and data files (bodies stored separately).
-            if "permission-check" in key or "/data/" in key:
-                continue
-            if not key.endswith(".json.gz") and not key.endswith(".json"):
-                continue
-            wanted.append((key, last_modified))
+    for list_prefix in _day_prefixes(s3, bucket, log_prefix, cutoff):
+        for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
+            for obj in page.get("Contents", []):
+                last_modified = obj["LastModified"]
+                # <= so a watermark equal to an object's time doesn't re-read it.
+                if last_modified <= cutoff:
+                    continue
+                key = obj["Key"]
+                # Skip permission-check files and data files (bodies stored separately).
+                if "permission-check" in key or "/data/" in key:
+                    continue
+                if not key.endswith(".json.gz") and not key.endswith(".json"):
+                    continue
+                wanted.append((key, last_modified))
 
     if not wanted:
         return None
@@ -98,9 +100,13 @@ def read_invocation_logs_to_store(store, bucket, prefix, region, days, since=Non
 
     max_workers = min(32, max(4, len(wanted)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for record, key, lm in pool.map(_fetch, wanted):
-            if record:
-                buffer.append((record, key, lm.astimezone(timezone.utc).isoformat()))
+        for records, key, lm in pool.map(_fetch, wanted):
+            if records:
+                lm_iso = lm.astimezone(timezone.utc).isoformat()
+                # One object can hold several invocations. The first keeps the
+                # bare key so rows from older stores still dedupe.
+                for i, record in enumerate(records):
+                    buffer.append((record, key if i == 0 else f"{key}#{i}", lm_iso))
                 if newest is None or lm > newest:
                     newest = lm
                 if len(buffer) >= INSERT_BATCH_SIZE:
@@ -111,6 +117,35 @@ def read_invocation_logs_to_store(store, bucket, prefix, region, days, since=Non
         store.insert_invocations(buffer)
 
     return newest.astimezone(timezone.utc).isoformat() if newest else None
+
+
+def _day_prefixes(s3, bucket, log_prefix, cutoff):
+    """S3 prefixes to list for objects modified after `cutoff`.
+
+    Model Invocation Logging writes keys as
+    AWSLogs/{account}/BedrockModelInvocationLogs/{region}/YYYY/MM/DD/HH/...
+    Listing only the day folders from the cutoff onward keeps each poll
+    proportional to new data, not to the whole bucket. One extra day before
+    the cutoff covers objects written just after midnight. Falls back to the
+    whole log prefix when the bucket does not follow that layout.
+    """
+    def _subdirs(prefix):
+        pages = s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix, Delimiter="/")
+        return [cp["Prefix"] for page in pages for cp in page.get("CommonPrefixes", [])]
+
+    region_prefixes = []
+    for account_prefix in _subdirs(log_prefix):
+        region_prefixes += _subdirs(f"{account_prefix}BedrockModelInvocationLogs/")
+    if not region_prefixes:
+        return [log_prefix]
+
+    today = datetime.now(timezone.utc).date()
+    day = max(cutoff.date() - timedelta(days=1), today - timedelta(days=MAX_PARTITION_DAYS))
+    days = []
+    while day <= today:
+        days.append(day)
+        day += timedelta(days=1)
+    return [f"{rp}{d:%Y/%m/%d}/" for rp in region_prefixes for d in days]
 
 
 def _coerce_dt(value):
@@ -125,26 +160,41 @@ def _coerce_dt(value):
 
 
 def _read_log_file(s3, bucket, key):
-    """Read and parse a single log file. Each file is one JSON record (not JSONL)."""
+    """Read and parse one log object into a list of normalised records.
+
+    Model Invocation Logging batches several invocations into one object as
+    concatenated JSON documents (newline-separated), so a single json.loads
+    fails on most busy-hour files. Parse document by document instead.
+    """
     response = s3.get_object(Bucket=bucket, Key=key)
     body = response["Body"].read()
 
     if key.endswith(".gz"):
         body = gzip.decompress(body)
 
-    try:
-        raw = json.loads(body.decode("utf-8"))
-    except json.JSONDecodeError:
-        return None
+    records = []
+    for raw in _iter_json_documents(body.decode("utf-8")):
+        for item in raw if isinstance(raw, list) else [raw]:
+            record = _normalise_record(item, s3, bucket)
+            if record:
+                records.append(record)
+    return records
 
-    # Handle case where file contains a list (shouldn't happen but defensive)
-    if isinstance(raw, list):
-        if raw:
-            raw = raw[0]
-        else:
-            return None
 
-    return _normalise_record(raw, s3, bucket)
+def _iter_json_documents(text):
+    """Yield each JSON document in `text`, stopping at the first malformed one."""
+    decoder = json.JSONDecoder()
+    i, n = 0, len(text)
+    while i < n:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            return
+        try:
+            doc, i = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            return
+        yield doc
 
 
 def _normalise_record(raw, s3, bucket):

@@ -26,9 +26,10 @@ from aiva.store import AuditStore
 
 def test_pricing_longest_match_wins():
     # opus-4-8 must not collide with a shorter "opus" prefix that isn't there.
-    pricing, priced = get_pricing("us.anthropic.claude-opus-4-8-20260101-v1:0")
+    pricing, priced = get_pricing("global.anthropic.claude-opus-4-8-20260101-v1:0")
     assert priced is True
-    assert pricing == PRICING_PER_1K["claude-opus-4-8"]
+    assert pricing["input"] == PRICING_PER_1K["claude-opus-4-8"]["input"]
+    assert pricing["output"] == PRICING_PER_1K["claude-opus-4-8"]["output"]
 
 
 def test_pricing_unknown_model_fails_loud():
@@ -556,3 +557,109 @@ def test_s3_key_prefix_handles_empty_and_slashed_prefixes():
     assert s3_key_prefix("a/b", "AWSLogs") == "a/b/AWSLogs/"
     assert s3_key_prefix("otel/") == "otel/"
     assert s3_key_prefix("") == ""
+
+# ---------------------------------------------------------------------------
+# Reader: list only day partitions after the cutoff
+# ---------------------------------------------------------------------------
+
+class _FakeDelimiterS3:
+    """list_objects_v2 paginator that answers Delimiter listings from a key set."""
+
+    def __init__(self, keys):
+        self.keys = keys
+
+    def get_paginator(self, _name):
+        return self
+
+    def paginate(self, Bucket, Prefix, Delimiter=None):
+        subdirs = sorted({Prefix + k[len(Prefix):].split("/", 1)[0] + "/"
+                          for k in self.keys if k.startswith(Prefix) and "/" in k[len(Prefix):]})
+        yield {"CommonPrefixes": [{"Prefix": p} for p in subdirs]}
+
+
+def test_day_prefixes_lists_only_days_since_cutoff():
+    from datetime import datetime, timedelta, timezone
+    from aiva.reader import _day_prefixes
+    root = "logs/AWSLogs/"
+    s3 = _FakeDelimiterS3([f"{root}111/BedrockModelInvocationLogs/us-west-2/2026/01/01/00/a.json.gz"])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=2)
+    prefixes = _day_prefixes(s3, "b", root, cutoff)
+    # cutoff day minus one, through today.
+    assert len(prefixes) == 4
+    assert all(p.startswith(f"{root}111/BedrockModelInvocationLogs/us-west-2/") for p in prefixes)
+    assert prefixes[-1].endswith(datetime.now(timezone.utc).strftime("%Y/%m/%d/"))
+
+
+def test_day_prefixes_falls_back_to_whole_prefix():
+    from datetime import datetime, timezone
+    from aiva.reader import _day_prefixes
+    s3 = _FakeDelimiterS3(["logs/AWSLogs/custom-layout/x.json"])
+    assert _day_prefixes(s3, "b", "logs/AWSLogs/", datetime.now(timezone.utc)) == ["logs/AWSLogs/"]
+
+
+def test_pricing_matches_published_bedrock_rates():
+    # AWS Pricing API, us-west-2, 2026-10-27, $ per 1M tokens.
+    from aiva.pricing import estimate_cost
+    m = 1_000_000
+    cases = [
+        ("global.anthropic.claude-opus-4-6-v1", 5.0, 25.0, 0.50, 6.25),
+        ("us.anthropic.claude-opus-4-6-v1", 5.5, 27.5, 0.55, 6.875),
+        ("arn:aws:bedrock:us-west-2:111122223333:inference-profile/us.anthropic.claude-sonnet-4-6", 3.3, 16.5, 0.33, 4.125),
+        ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.1, 5.5, 0.11, 1.375),
+        ("us.anthropic.claude-sonnet-4-20250514-v1:0", 3.0, 15.0, 0.30, 3.75),
+    ]
+    for model, inp, out, read, write in cases:
+        for tokens, expected in [((m, 0, 0, 0), inp), ((0, m, 0, 0), out), ((0, 0, m, 0), read), ((0, 0, 0, m), write)]:
+            cost, priced = estimate_cost(tokens[0], tokens[1], model, tokens[2], tokens[3])
+            assert priced and abs(cost - expected) < 1e-6, (model, tokens, cost, expected)
+
+
+def test_pricing_opus_5_5_cache_read_rate():
+    from aiva.pricing import estimate_cost
+    cost, _ = estimate_cost(0, 0, "global.anthropic.claude-opus-5-5", cache_read_tokens=1_000_000)
+    assert abs(cost - 0.20) < 1e-9
+
+
+def test_read_log_file_returns_every_record_in_object():
+    import gzip as _gzip
+    from aiva.reader import _read_log_file
+
+    def rec(rid):
+        return json.dumps({"modelId": "us.anthropic.claude-opus-5-5", "requestId": rid, "operation": "InvokeModel",
+                           "input": {"inputTokenCount": 10, "inputBodyJson": {"messages": []}},
+                           "output": {"outputTokenCount": 5, "outputBodyJson": {}}}, indent=1)
+
+    body = _gzip.compress(("\n".join(rec(f"r{i}") for i in range(3)) + "\n").encode())
+
+    class _S3:
+        def get_object(self, Bucket, Key):
+            class _B:
+                def read(self_inner):
+                    return body
+            return {"Body": _B()}
+
+    records = _read_log_file(_S3(), "b", "k.json.gz")
+    assert [r["request_id"] for r in records] == ["r0", "r1", "r2"]
+
+
+def test_read_log_file_keeps_every_record_in_a_batched_object():
+    # Model Invocation Logging writes several records per object; each must survive.
+    import gzip
+    import io
+    import json
+    from aiva.reader import _read_log_file
+
+    def record(i):
+        return {"timestamp": f"2026-11-01T00:00:0{i}Z", "requestId": str(i),
+                "modelId": "global.anthropic.claude-sonnet-4-6",
+                "input": {"inputTokenCount": 10, "inputBodyJson": {"messages": []}},
+                "output": {"outputTokenCount": 5, "outputBodyJson": {}}}
+
+    body = gzip.compress("\n".join(json.dumps(record(i)) for i in range(3)).encode())
+
+    class _S3:
+        def get_object(self, Bucket, Key):
+            return {"Body": io.BytesIO(body)}
+
+    rows = _read_log_file(_S3(), "b", "AWSLogs/1/BedrockModelInvocationLogs/us-west-2/2026/11/01/00/x.json.gz")
+    assert len(rows) == 3
