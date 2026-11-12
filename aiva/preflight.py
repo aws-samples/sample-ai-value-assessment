@@ -156,6 +156,7 @@ def _check_bucket_access(checks, bucket, prefix, region, identity, source="bedro
                 "status": "pass",
                 "detail": f"Found log objects under s3://{bucket}/{log_prefix}.",
             })
+            _check_object_read(checks, s3, bucket, resp["Contents"][0]["Key"])
         else:
             checks.append({
                 "name": check_name,
@@ -170,6 +171,32 @@ def _check_bucket_access(checks, bucket, prefix, region, identity, source="bedro
             "status": "fail",
             "detail": f"Could not list objects under '{log_prefix}': {code}.",
             "hint": "Confirm s3:ListBucket is granted (see docs/iam-policy.json).",
+        })
+
+
+def _check_object_read(checks, s3, bucket, key):
+    """Read one byte of a real log object: listing works without s3:GetObject or kms:Decrypt."""
+    try:
+        s3.get_object(Bucket=bucket, Key=key, Range="bytes=0-0")["Body"].read()
+        checks.append({
+            "name": "Log objects readable",
+            "status": "pass",
+            "detail": f"Read s3://{bucket}/{key}.",
+        })
+    except ClientError as e:
+        code = e.response["Error"].get("Code", "")
+        if code == "InvalidRange":  # empty object: access is proven
+            checks.append({"name": "Log objects readable", "status": "pass", "detail": f"Read s3://{bucket}/{key}."})
+            return
+        hint = ("Grant s3:GetObject on this bucket and, if it uses SSE-KMS, kms:Decrypt on its key "
+                "(CloudFormation: set SourceBucketKmsKeyArn)."
+                if code in ("403", "AccessDenied") or code.startswith("KMS") else
+                "Check the object still exists and your permissions on it.")
+        checks.append({
+            "name": "Log objects readable",
+            "status": "fail",
+            "detail": f"Could not read s3://{bucket}/{key}: {code}.",
+            "hint": hint,
         })
 
 

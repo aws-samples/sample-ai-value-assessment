@@ -722,3 +722,42 @@ def test_template_grants_kms_decrypt_only_on_the_given_key_via_s3():
     assert re.search(r"Action:\n\s+- kms:Decrypt\n\s+Resource: !Ref SourceBucketKmsKeyArn\n", grant)
     assert 'kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"' in grant
     assert role.count("kms:") == 2 and "Principal: \"*\"" not in role
+
+
+def _client_error(code, message=""):
+    from botocore.exceptions import ClientError
+    return ClientError({"Error": {"Code": code, "Message": message}}, "GetObject")
+
+
+def test_preflight_reads_a_log_object_and_names_kms_decrypt(monkeypatch):
+    # Listing works without kms:Decrypt, so only a real GetObject catches a KMS-encrypted bucket.
+    import io
+    import aiva.preflight as preflight
+
+    class _Fake:
+        def __init__(self, get_error):
+            self.get_error = get_error
+
+        def get_caller_identity(self):
+            return {"Arn": "arn:aws:iam::111122223333:role/r", "Account": "111122223333"}
+
+        def head_bucket(self, Bucket):
+            return {}
+
+        def list_objects_v2(self, Bucket, Prefix, MaxKeys):
+            return {"KeyCount": 1, "Contents": [{"Key": f"{Prefix}x.json.gz"}]}
+
+        def get_object(self, Bucket, Key, Range=None):
+            if self.get_error:
+                raise self.get_error
+            return {"Body": io.BytesIO(b"x")}
+
+        def converse(self, **_):
+            return {}
+
+    for err, status in [(None, "pass"), (_client_error("AccessDenied", "not authorized to perform: kms:Decrypt"), "fail")]:
+        fake = _Fake(err)
+        monkeypatch.setattr(preflight.boto3, "client", lambda *_a, **_k: fake)
+        checks = {c["name"]: c for c in preflight.run_preflight("b", "logs", "us-west-2", "m")}
+        assert checks["Log objects readable"]["status"] == status
+    assert "kms:Decrypt" in checks["Log objects readable"]["hint"]
