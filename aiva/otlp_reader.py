@@ -193,7 +193,8 @@ def _normalise_log_record(log_record, resource_attrs):
     if not _is_relevant_event(event_name, attrs):
         return None
 
-    time_nano = log_record.get("timeUnixNano", log_record.get("observedTimeUnixNano", 0))
+    # OTLP: a timeUnixNano of 0 means unknown, use the collector's observed time.
+    time_nano = _to_int(log_record.get("timeUnixNano")) or _to_int(log_record.get("observedTimeUnixNano"))
     timestamp = _nano_to_iso(time_nano)
 
     model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _extract_model_and_tokens(attrs, resource_attrs)
