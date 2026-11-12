@@ -775,3 +775,37 @@ def test_failed_pass2b_is_not_assessed_and_reports_render(tmp_path):
     generate_json_report(assessments, str(tmp_path / "r.json"))
     summary = json.loads((tmp_path / "r.json").read_text())["summary"]
     assert summary["not_assessed"] == 2 and summary["sessions_not_classified"] == 1
+
+
+def _stub_activity(i, cost=10.0, activity="Pricing research", inv=5, unpriced=0):
+    return {"session_id": f"session_{i}", "activity": activity, "description": "desc",
+            "business_value": "", "confidence": "high", "caller": f"arn:caller{i}",
+            "duration": "", "samples": [],
+            "metrics": {"invocation_count": inv, "total_input_tokens": 100, "total_output_tokens": 10,
+                        "total_cost_usd": cost, "models_used": ["m"], "tagged_count": inv,
+                        "guardrail_count": inv, "unpriced_count": unpriced}}
+
+
+def test_repeated_ids_never_double_count_cost(monkeypatch):
+    from aiva import classifier
+    acts = [_stub_activity(i) for i in range(3)]
+    pass2a = {"use_cases": [
+        {"name": "Pricing research", "session_ids": ["session_0", "session_1"]},
+        {"name": "Cost modelling", "session_ids": ["session_1", "session_2"]},
+        {"name": "Dup within list", "session_ids": ["session_2", "session_2"]},
+    ]}
+    monkeypatch.setattr(classifier.boto3, "client", lambda *a, **kw: _FakeBedrock(pass2a))
+    clusters = classifier.cluster_use_cases(acts, "us-west-2", "m")
+    assert sum(c["metrics"]["total_cost_usd"] for c in clusters) == 30.0
+    assert sum(c["metrics"]["session_count"] for c in clusters) == 3
+
+    chunk = [_build_cluster(f"uc{i}", "", [a]) for i, a in enumerate(acts)]
+    merge = {"merged": [{"name": "A", "cluster_ids": ["cluster_0", "cluster_1", "cluster_1"]},
+                        {"name": "B", "cluster_ids": ["cluster_1", "cluster_2"]}]}
+    merged = classifier._merge_one_batch(_FakeBedrock(merge), chunk, "m")
+    assert sum(c["metrics"]["total_cost_usd"] for c in merged) == 30.0
+
+    # The invariant check refuses a clustering that changed total cost.
+    import pytest
+    with pytest.raises(RuntimeError):
+        classifier._check_partition(acts, [_build_cluster("x", "", acts + acts[:1])], "test")
