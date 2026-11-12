@@ -136,6 +136,8 @@ Each use case carries one recommendation:
 - **STOP**: no identifiable task, or work that does not need AI.
 - **REFINE**: real value but inefficient (wrong model tier, no caching, bloated prompts).
 - **EXPAND**: clear value, efficient, worth scaling.
+- **NOT ASSESSED**: the classification call failed (Bedrock error, refusal or
+  unparseable output). Re-run to assess it. The CLI and reports show the count.
 
 A separate axis labels each use case **experimental** or **repeatable**. A
 repeatable use case running outside sanctioned channels is shadow AI worth
@@ -143,7 +145,9 @@ surfacing to your platform or security team.
 
 Cost-optimisation checks (model right-sizing, caching, tagging, output
 guardrails) are shown per use case. Cost and monthly projection are computed in
-code, not by the model.
+code, not by the model. The projection uses the span the logs actually cover
+within `--days`. Cost is marked partial or unknown when invocations use a model
+with no known rate.
 
 Classification is semantic. Treat each recommendation as a starting point for
 human review, not automated action.
