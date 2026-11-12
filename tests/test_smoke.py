@@ -873,3 +873,19 @@ def test_unpriced_invocations_block_trivial_spend_stop(tmp_path):
     data = json.loads((tmp_path / "r.json").read_text())
     assert data["summary"]["unpriced_invocations"] == 300
     assert data["use_cases"][0]["metrics"]["unpriced_invocation_count"] == 300
+
+
+def test_tagging_check_ignores_session_ids_and_reader_keys():
+    from aiva.classifier import _describe_activity, _check_tagging
+    from aiva.otlp_reader import _build_metadata
+
+    def tagging(md):
+        act = _describe_activity(_FakeBedrock({"activity": "Release notes"}), _session(0),
+                                 _invocations(20, metadata=md), "m")
+        return _check_tagging(_build_cluster("x", "", [act])["metrics"])["status"]
+
+    assert tagging(_build_metadata({}, {"service.name": "claude-code", "service.version": "2.1"}, "s1")) == "fail"
+    assert tagging({"session_id": "3f1c", "conversationId": "c9"}) == "fail"
+    assert tagging({"source": "my-app"}) == "fail"
+    assert tagging({"session_id": "3f1c", "team": "pricing"}) == "pass"
+    assert tagging(_build_metadata({"deployment.environment": "prod"}, {"service.name": "claude-code"}, "")) == "pass"

@@ -12,6 +12,7 @@ from aiva.prompts.pass1_describe import Pass1DescribePrompt
 from aiva.prompts.pass2a_cluster import Pass2aClusterPrompt
 from aiva.prompts.pass2a_merge import Pass2aMergePrompt
 from aiva.prompts.pass2b_classify import Pass2bClassifyPrompt
+from aiva.store import _SESSION_ID_KEYS
 
 _pass1 = Pass1DescribePrompt()
 _pass2a = Pass2aClusterPrompt()
@@ -44,6 +45,10 @@ _BEDROCK_CONFIG = Config(retries={"mode": "adaptive", "max_attempts": 10})
 # refusal, truncated or unparseable output). Never counted as STOP/REFINE/EXPAND.
 NOT_ASSESSED = "NOT_ASSESSED"
 NOT_ASSESSED_ACTIVITY = "Not assessed (classification call failed)"
+
+# requestMetadata keys that are not cost attribution: session ids, plus the
+# keys the readers add themselves (OTLP source/service fields).
+_NON_TAG_KEYS = frozenset(_SESSION_ID_KEYS) | {"source", "source_format", "service_name", "service_version"}
 
 # Whole words only, so "transcript", "description" and "ruled" do not match.
 _DETERMINISTIC_RE = re.compile(
@@ -160,7 +165,7 @@ def _describe_activity(bedrock, session, invocations, model_id):
     sample_responses = []
     models_used = set()
     all_tools = set()
-    tagged_count = 0        # invocations carrying requestMetadata (cost attribution)
+    tagged_count = 0        # invocations carrying cost-attribution requestMetadata
     guardrail_count = 0     # invocations with a max_tokens cap set
     unpriced_count = 0      # invocations whose model has no known rate (costed at $0)
 
@@ -168,7 +173,8 @@ def _describe_activity(bedrock, session, invocations, model_id):
         models_used.add(inv.get("model", "unknown"))
         for t in inv.get("tools", []):
             all_tools.add(t)
-        if inv.get("metadata"):
+        md = inv.get("metadata")
+        if isinstance(md, dict) and any(k not in _NON_TAG_KEYS for k in md):
             tagged_count += 1
         if inv.get("max_tokens") is not None:
             guardrail_count += 1
