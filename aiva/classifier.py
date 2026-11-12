@@ -12,7 +12,7 @@ from aiva.prompts.pass1_describe import Pass1DescribePrompt
 from aiva.prompts.pass2a_cluster import Pass2aClusterPrompt
 from aiva.prompts.pass2a_merge import Pass2aMergePrompt
 from aiva.prompts.pass2b_classify import Pass2bClassifyPrompt
-from aiva.store import _SESSION_ID_KEYS
+from aiva.store import _SESSION_ID_KEYS, AUDIT_SOURCE
 
 _pass1 = Pass1DescribePrompt()
 _pass2a = Pass2aClusterPrompt()
@@ -69,7 +69,7 @@ def _bedrock_client(region):
     return boto3.client("bedrock-runtime", region_name=region, config=_BEDROCK_CONFIG)
 
 
-def classify_activities(store, sessions, region, model_id):
+def classify_activities(store, sessions, region, model_id, audit_nonce=None):
     """Pass 1: describe the business task behind each session (tool-agnostic).
 
     Sessions carry `invocation_ids`, not full invocation content (see
@@ -97,7 +97,7 @@ def classify_activities(store, sessions, region, model_id):
 
     def _describe(session):
         invocations = store.fetch_full_invocations(session["invocation_ids"])
-        return _describe_activity(_client(), session, invocations, model_id)
+        return _describe_activity(_client(), session, invocations, model_id, audit_nonce)
 
     max_workers = min(PASS1_MAX_WORKERS, len(sessions))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -106,7 +106,7 @@ def classify_activities(store, sessions, region, model_id):
         return list(pool.map(_describe, sessions))
 
 
-def cluster_use_cases(activities, region, model_id):
+def cluster_use_cases(activities, region, model_id, audit_nonce=None):
     """Pass 2a: group activities into distinct use cases by meaning.
 
     Below CHUNK_SIZE this is exactly the original single-call path, unchanged.
@@ -119,14 +119,15 @@ def cluster_use_cases(activities, region, model_id):
     bedrock = _bedrock_client(region)
 
     if len(activities) <= CHUNK_SIZE:
-        return _check_partition(activities, _cluster_activities(bedrock, activities, model_id), "Pass 2a")
+        return _check_partition(activities, _cluster_activities(bedrock, activities, model_id, audit_nonce), "Pass 2a")
 
     chunk_clusters = []
     for chunk in _chunk_list(activities, CHUNK_SIZE):
-        chunk_clusters.extend(_cluster_activities(bedrock, chunk, model_id))
+        chunk_clusters.extend(_cluster_activities(bedrock, chunk, model_id, audit_nonce))
     _check_partition(activities, chunk_clusters, "Pass 2a")
 
-    merged = _merge_clusters_across_chunks(bedrock, chunk_clusters, model_id)
+    merged = _merge_clusters_across_chunks(bedrock, chunk_clusters, model_id,
+                                           audit_nonce=audit_nonce)
     return _check_partition(activities, merged, "Pass 2a merge")
 
 
@@ -143,14 +144,14 @@ def _check_partition(activities, clusters, stage):
     return clusters
 
 
-def classify_use_cases(clusters, region, model_id, window_days=7):
+def classify_use_cases(clusters, region, model_id, window_days=7, audit_nonce=None):
     """Pass 2b: STOP/REFINE/EXPAND + cost optimisation per use case.
 
     window_days is the observation window the logs cover; used to compute the
     monthly cost projection deterministically in Python (never by the LLM).
     """
     bedrock = _bedrock_client(region)
-    return [_classify_use_case(bedrock, c, model_id, window_days) for c in clusters]
+    return [_classify_use_case(bedrock, c, model_id, window_days, audit_nonce) for c in clusters]
 
 
 def project_monthly_cost(observed_cost_usd, window_days):
@@ -164,7 +165,7 @@ def project_monthly_cost(observed_cost_usd, window_days):
 # Pass 1
 # ---------------------------------------------------------------------------
 
-def _describe_activity(bedrock, session, invocations, model_id):
+def _describe_activity(bedrock, session, invocations, model_id, audit_nonce=None):
     """Name the underlying business task for one session, ignoring the tool.
 
     `invocations` is the full-payload fetch for this session's ids (see
@@ -226,7 +227,7 @@ def _describe_activity(bedrock, session, invocations, model_id):
         total_input=total_input, total_output=total_output,
     )
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit")
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, audit_nonce=audit_nonce)
     failed = parsed is None
     if failed:
         parsed = {"activity": NOT_ASSESSED_ACTIVITY}
@@ -265,7 +266,7 @@ def _chunk_list(items, size):
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def _cluster_activities(bedrock, activities, model_id):
+def _cluster_activities(bedrock, activities, model_id, audit_nonce=None):
     """Group Pass-1 activities into distinct use cases by meaning."""
     # Nothing to cluster
     if not activities:
@@ -280,7 +281,7 @@ def _cluster_activities(bedrock, activities, model_id):
 
     prompt = _pass2a.build_prompt(listing=listing)
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, audit_nonce=audit_nonce) or {}
     use_cases = _as_dict_list(parsed.get("use_cases"))
 
     # Only ids this call issued are accepted; anything else the model returns is dropped.
@@ -378,7 +379,7 @@ def cap_use_cases(clusters, max_use_cases):
 MERGE_MAX_DEPTH = 6  # log_50(huge number) is small; this is a sanity backstop, not a real limit.
 
 
-def _merge_clusters_across_chunks(bedrock, chunk_clusters, model_id, depth=0):
+def _merge_clusters_across_chunks(bedrock, chunk_clusters, model_id, depth=0, audit_nonce=None):
     """Merge same-meaning clusters produced independently by different chunks.
 
     Recursive, not a one-shot with a hard ceiling: if there are more clusters
@@ -406,7 +407,7 @@ def _merge_clusters_across_chunks(bedrock, chunk_clusters, model_id, depth=0):
         return chunk_clusters
 
     if len(chunk_clusters) <= MERGE_MAX_CLUSTERS:
-        return _merge_one_batch(bedrock, chunk_clusters, model_id)
+        return _merge_one_batch(bedrock, chunk_clusters, model_id, audit_nonce)
 
     if depth >= MERGE_MAX_DEPTH:
         return chunk_clusters
@@ -414,12 +415,12 @@ def _merge_clusters_across_chunks(bedrock, chunk_clusters, model_id, depth=0):
     batches = _chunk_list(chunk_clusters, MERGE_MAX_CLUSTERS)
     merged_batches = []
     for batch in batches:
-        merged_batches.extend(_merge_one_batch(bedrock, batch, model_id))
+        merged_batches.extend(_merge_one_batch(bedrock, batch, model_id, audit_nonce))
 
-    return _merge_clusters_across_chunks(bedrock, merged_batches, model_id, depth=depth + 1)
+    return _merge_clusters_across_chunks(bedrock, merged_batches, model_id, depth=depth + 1, audit_nonce=audit_nonce)
 
 
-def _merge_one_batch(bedrock, chunk_clusters, model_id):
+def _merge_one_batch(bedrock, chunk_clusters, model_id, audit_nonce=None):
     """Merge same-meaning clusters within a single batch (one Bedrock call).
 
     Reuses _build_cluster (not new aggregation logic): a merge group's members
@@ -439,7 +440,7 @@ def _merge_one_batch(bedrock, chunk_clusters, model_id):
 
     prompt = _pass2a_merge.build_prompt(listing=listing)
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, audit_nonce=audit_nonce) or {}
     merged = _as_dict_list(parsed.get("merged"))
 
     # Only ids this call issued are accepted; anything else the model returns is dropped.
@@ -473,7 +474,7 @@ def _merge_one_batch(bedrock, chunk_clusters, model_id):
 # Pass 2b
 # ---------------------------------------------------------------------------
 
-def _classify_use_case(bedrock, cluster, model_id, window_days=7):
+def _classify_use_case(bedrock, cluster, model_id, window_days=7, audit_nonce=None):
     """STOP/REFINE/EXPAND + cost optimisation for one use case."""
     m = cluster["metrics"]
     sample_activities = "\n".join(
@@ -496,7 +497,7 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
         return _not_assessed(cluster, projected_monthly, window_days,
                              f"Pass 1 failed for all {len(sessions)} session(s).")
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit")
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, audit_nonce=audit_nonce)
     if parsed is None:
         return _not_assessed(cluster, projected_monthly, window_days, "Pass 2b classification call failed.")
     parsed = _normalise_pass2b(parsed)
@@ -853,21 +854,26 @@ def _extract_real_user_text(content):
     return ""
 
 
-def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, tag=None):
+def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, audit_nonce=None):
     """Invoke Bedrock and parse a JSON object response.
 
     Returns None on failure (API error after retries, truncated output,
     refusal or prose that is not a JSON object), so callers can tell a failed
     call apart from a real but empty answer.
+
+    Every call is tagged as audit overhead. Only calls carrying this run's
+    audit_nonce are later excluded from the audit (see AuditStore.issue_audit_nonce).
     """
     try:
+        request_metadata = {"source": AUDIT_SOURCE}
+        if audit_nonce:
+            request_metadata["aiva_run"] = audit_nonce
         kwargs = {
             "modelId": model_id,
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
             "inferenceConfig": {"maxTokens": max_tokens, "temperature": 0},
+            "requestMetadata": request_metadata,
         }
-        if tag:
-            kwargs["requestMetadata"] = {"source": tag}
         response = bedrock.converse(**kwargs)
         if response.get("stopReason") == "max_tokens":
             return None

@@ -319,8 +319,8 @@ def test_json_report_generates_and_is_valid_json(tmp_path):
 # exercises the actual query execution end to end, not just the SQL text.
 # ---------------------------------------------------------------------------
 
-def _record(caller="user-a", cost=0.05, overhead=False):
-    metadata = {"source": "aiva-audit"} if overhead else {"session_id": "sess-1"}
+def _record(caller="user-a", cost=0.05, metadata=None):
+    metadata = metadata if metadata is not None else {"session_id": "sess-1"}
     return {
         "timestamp": "2026-01-01T00:00:00Z", "model": "claude-sonnet-4-6",
         "input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0,
@@ -335,9 +335,10 @@ def _record(caller="user-a", cost=0.05, overhead=False):
 
 def test_store_fetch_light_rows_excludes_overhead_and_matches_column_order(tmp_path):
     store = AuditStore(str(tmp_path / "audit.db"))
+    overhead = {"source": "aiva-audit", "aiva_run": store.issue_audit_nonce()}
     store.insert_invocations([
         (_record(caller="user-a"), "s3://bucket/key-1", "2026-01-01T00:00:00Z"),
-        (_record(caller="user-b", overhead=True), "s3://bucket/key-2", "2026-01-01T00:01:00Z"),
+        (_record(caller="user-b", metadata=overhead), "s3://bucket/key-2", "2026-01-01T00:01:00Z"),
     ])
 
     rows = store.fetch_light_rows()
@@ -1100,3 +1101,41 @@ def test_markdown_report_escapes_raw_html(tmp_path):
     md = out.read_text()
     assert "<img" not in md
     assert md.count("&lt;img src=x onerror=alert(1)&gt;") >= 10
+
+
+# ---------------------------------------------------------------------------
+# Audit overhead: only calls carrying a nonce this store issued are excluded
+# ---------------------------------------------------------------------------
+
+def test_store_only_excludes_overhead_with_a_nonce_it_issued(tmp_path):
+    path = str(tmp_path / "audit.db")
+    store = AuditStore(path)
+    nonce = store.issue_audit_nonce()
+    store.close()
+
+    store = AuditStore(path)  # nonce survives a reopen (resumed run)
+    assert store.issue_audit_nonce() != nonce
+    store.insert_invocations([
+        (_record(caller="ours", metadata={"source": "aiva-audit", "aiva_run": nonce}), "k1", "2026-01-01T00:00:00Z"),
+        (_record(caller="spoof-bare", metadata={"source": "aiva-audit"}), "k2", "2026-01-01T00:01:00Z"),
+        (_record(caller="spoof-forged", metadata={"source": "aiva-audit", "aiva_run": "deadbeef"}),
+         "k3", "2026-01-01T00:02:00Z"),
+    ])
+    assert sorted(r["caller"] for r in store.fetch_light_rows()) == ["spoof-bare", "spoof-forged"]
+    assert store.overhead_summary()[0] == 1
+    store.close()
+
+
+def test_classifier_tags_every_call_with_the_run_nonce():
+    from aiva.classifier import _describe_activity, _cluster_activities, _merge_one_batch, _classify_use_case
+    tag = {"source": "aiva-audit", "aiva_run": "abc123"}
+    acts = [_pass1_activity(0), _pass1_activity(1)]
+    sess = {"session_id": "session_0", "caller": "a", "first_ts": None, "last_ts": None,
+            "total_cost_usd": 0.0}
+    fake = _FakeBedrock({})
+    _describe_activity(fake, sess, [], "m", audit_nonce="abc123")
+    _cluster_activities(fake, acts, "m", audit_nonce="abc123")
+    _merge_one_batch(fake, [_build_cluster("A", "a", [acts[0]]), _build_cluster("B", "b", [acts[1]])],
+                     "m", audit_nonce="abc123")
+    _classify_use_case(fake, _build_cluster("A", "a", acts), "m", 7, audit_nonce="abc123")
+    assert fake.request_metadata == [tag] * 4

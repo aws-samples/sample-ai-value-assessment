@@ -32,6 +32,12 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta
 
+from aiva.prompts.common import make_nonce
+
+# requestMetadata "source" value on the audit's own Bedrock calls. Public, so
+# on its own it proves nothing; see AuditStore.issue_audit_nonce.
+AUDIT_SOURCE = "aiva-audit"
+
 # requestMetadata keys that carry an explicit session/conversation identifier.
 # Checked in order; first present wins. Moved here (from cli.py) because
 # session_key is now computed once, at insert time, not re-derived from raw
@@ -98,6 +104,7 @@ class AuditStore:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_session_key ON invocations(session_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_overhead ON invocations(is_audit_overhead)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_last_modified ON invocations(last_modified)")
+        conn.execute("CREATE TABLE IF NOT EXISTS audit_nonces (nonce TEXT PRIMARY KEY)")
         conn.commit()
 
     def _connect(self):
@@ -118,7 +125,9 @@ class AuditStore:
         makes the resume watermark safe to pad backward rather than exact.
         """
         conn = self._connect()
-        rows = [_to_row(record, s3_key, last_modified) for record, s3_key, last_modified in items]
+        nonces = {row[0] for row in conn.execute("SELECT nonce FROM audit_nonces")}
+        rows = [_to_row(record, s3_key, last_modified, nonces)
+                for record, s3_key, last_modified in items]
         conn.executemany(
             "INSERT OR IGNORE INTO invocations (s3_key, last_modified, timestamp, model, "
             "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "
@@ -128,6 +137,21 @@ class AuditStore:
             rows,
         )
         conn.commit()
+
+    def issue_audit_nonce(self):
+        """Issue and persist a fresh nonce for this run's own Bedrock calls.
+
+        The classifier tags its calls with it (requestMetadata aiva_run). A
+        logged call is only treated as audit overhead when its nonce is one
+        this store issued, so a workload cannot hide from the audit by
+        copying the public "aiva-audit" source tag. Persisted so a resumed
+        run (same --db) still recognises calls made by earlier runs.
+        """
+        nonce = make_nonce()
+        conn = self._connect()
+        conn.execute("INSERT INTO audit_nonces (nonce) VALUES (?)", (nonce,))
+        conn.commit()
+        return nonce
 
     def resume_watermark(self):
         """Return the ISO-8601 UTC timestamp to resume listing from, padded
@@ -224,12 +248,18 @@ def _session_key(record):
     return None
 
 
-def _is_audit_overhead(record):
+def _is_audit_overhead(record, nonces):
+    """True only for calls tagged with a nonce this store issued (see issue_audit_nonce).
+
+    A bare or unknown-nonce "aiva-audit" tag stays in the audit: hiding real
+    spend is worse than counting a little of our own.
+    """
     md = record.get("metadata")
-    return isinstance(md, dict) and md.get("source") == "aiva-audit"
+    return (isinstance(md, dict) and md.get("source") == AUDIT_SOURCE
+            and md.get("aiva_run") in nonces)
 
 
-def _to_row(record, s3_key, last_modified):
+def _to_row(record, s3_key, last_modified, nonces):
     payload = json.dumps({
         "system_prompt": record.get("system_prompt", ""),
         "tools": record.get("tools", []),
@@ -254,7 +284,7 @@ def _to_row(record, s3_key, last_modified):
         record.get("request_id", ""),
         record.get("max_tokens"),
         _session_key(record),
-        1 if _is_audit_overhead(record) else 0,
+        1 if _is_audit_overhead(record, nonces) else 0,
         payload,
     )
 
