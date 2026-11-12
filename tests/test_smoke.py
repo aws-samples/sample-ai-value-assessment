@@ -826,3 +826,26 @@ def test_stop_deterministic_gate_matches_whole_words_only():
                  "A regex covers it.", "Pure lookup work."):
         rec, reason = verdict(text)
         assert rec == "STOP" and "deterministic" in reason.lower(), text
+
+
+def test_pricing_claude_3_and_opus_4_bedrock_ids():
+    # Bedrock on-demand list prices, us-east-1, $ per 1M tokens.
+    from aiva.pricing import estimate_cost
+    m = 1_000_000
+    cases = [
+        ("anthropic.claude-3-5-sonnet-20240620-v1:0", 3.0, 15.0),
+        ("us.anthropic.claude-3-5-sonnet-20241022-v2:0", 3.0, 15.0),
+        ("us.anthropic.claude-3-7-sonnet-20250219-v1:0", 3.0, 15.0),
+        ("anthropic.claude-3-haiku-20240307-v1:0", 0.25, 1.25),
+        ("us.anthropic.claude-3-5-haiku-20241022-v1:0", 0.80, 4.0),
+        ("us.anthropic.claude-opus-4-20250514-v1:0", 15.0, 75.0),
+        ("us.anthropic.claude-opus-4-1-20250805-v1:0", 15.0, 75.0),
+    ]
+    for model, inp, out in cases:
+        assert abs(estimate_cost(m, 0, model)[0] - inp) < 1e-6, model
+        assert abs(estimate_cost(0, m, model)[0] - out) < 1e-6, model
+    # Unconfirmed for us-east-1 on demand: stays unpriced rather than guessed.
+    assert estimate_cost(m, m, "anthropic.claude-3-opus-20240229-v1:0") == (0.0, False)
+    # Newer Opus 4.x keeps its own rate, not Opus 4's.
+    assert abs(estimate_cost(m, 0, "global.anthropic.claude-opus-4-5-20251101-v1:0")[0] - 5.0) < 1e-6
+

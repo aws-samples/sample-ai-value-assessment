@@ -26,8 +26,16 @@ PRICING_PER_1K = {
     "claude-sonnet-4-5": {"input": 0.003, "output": 0.015},
     "claude-sonnet-4": {"input": 0.003, "output": 0.015},
     "claude-haiku-4-5": {"input": 0.001, "output": 0.005},
-    "claude-haiku-3-5": {"input": 0.0008, "output": 0.004},
-    "claude-haiku-3": {"input": 0.00025, "output": 0.00125},
+    # Bedrock on-demand list prices, us-east-1, spelled as the Bedrock model
+    # IDs spell them. "claude-opus-4-2025" is the dated Opus 4 ID only, so a
+    # new 4.x Opus is never silently priced at Opus 4 rates. Claude 3 Opus is
+    # left unpriced on purpose: not offered on demand in us-east-1.
+    "claude-opus-4-1": {"input": 0.015, "output": 0.075},
+    "claude-opus-4-2025": {"input": 0.015, "output": 0.075},
+    "claude-3-7-sonnet": {"input": 0.003, "output": 0.015},
+    "claude-3-5-sonnet": {"input": 0.003, "output": 0.015},
+    "claude-3-5-haiku": {"input": 0.0008, "output": 0.004},
+    "claude-3-haiku": {"input": 0.00025, "output": 0.00125},
     "nova-pro": {"input": 0.0008, "output": 0.0032},
     "nova-lite": {"input": 0.00006, "output": 0.00024},
     "nova-micro": {"input": 0.000035, "output": 0.00014},
