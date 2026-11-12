@@ -954,6 +954,9 @@ def test_parse_json_response_handles_fences_in_strings_and_prose_braces():
     assert _parse_json_response("Classifying {session}: " + json.dumps(good)) == good
     assert _parse_json_response("[1, 2]") is None
     assert _parse_json_response("no json here") is None
+    # Truncated at max_tokens: never return an inner fragment as if it were the reply.
+    truncated = '{"use_cases": [{"name": "A", "session_ids": ["session_0"]}, {"name": "B", "sess'
+    assert _parse_json_response(truncated) is None
 
 
 def test_pass2b_survives_wrong_types_from_model():
