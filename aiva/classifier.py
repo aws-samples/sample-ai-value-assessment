@@ -98,13 +98,28 @@ def cluster_use_cases(activities, region, model_id):
     bedrock = _bedrock_client(region)
 
     if len(activities) <= CHUNK_SIZE:
-        return _cluster_activities(bedrock, activities, model_id)
+        return _check_partition(activities, _cluster_activities(bedrock, activities, model_id), "Pass 2a")
 
     chunk_clusters = []
     for chunk in _chunk_list(activities, CHUNK_SIZE):
         chunk_clusters.extend(_cluster_activities(bedrock, chunk, model_id))
+    _check_partition(activities, chunk_clusters, "Pass 2a")
 
-    return _merge_clusters_across_chunks(bedrock, chunk_clusters, model_id)
+    merged = _merge_clusters_across_chunks(bedrock, chunk_clusters, model_id)
+    return _check_partition(activities, merged, "Pass 2a merge")
+
+
+def _check_partition(activities, clusters, stage):
+    """Invariant: every activity lands in exactly one cluster, so total cost
+    is unchanged. A model that lists an id twice must never double count."""
+    placed = sorted(id(s) for c in clusters for s in c["sessions"])
+    expected = sorted(id(a) for a in activities)
+    before = sum(a["metrics"]["total_cost_usd"] for a in activities)
+    after = sum(c["metrics"]["total_cost_usd"] for c in clusters)
+    if placed != expected or abs(after - before) > 1e-6 * max(1.0, abs(before)):
+        raise RuntimeError(f"{stage} changed the session set or total cost "
+                           f"(${before:.4f} -> ${after:.4f}); refusing to report double-counted spend.")
+    return clusters
 
 
 def classify_use_cases(clusters, region, model_id, window_days=7):
@@ -246,7 +261,10 @@ def _cluster_activities(bedrock, activities, model_id):
     assigned = set()
 
     for uc in use_cases:
-        ids = [sid for sid in uc.get("session_ids", []) if sid in by_id]
+        # First listing wins: an id repeated within or across use cases is
+        # placed once, so its cost is counted once.
+        ids = [sid for sid in dict.fromkeys(uc.get("session_ids", []))
+               if sid in by_id and sid not in assigned]
         members = [by_id[sid] for sid in ids]
         if not members:
             continue
@@ -311,6 +329,7 @@ def cap_use_cases(clusters, max_use_cases):
     """
     if len(clusters) <= max_use_cases:
         return clusters
+    sessions = [s for c in clusters for s in c["sessions"]]
 
     ranked = sorted(clusters, key=lambda c: c["metrics"]["total_cost_usd"], reverse=True)
     kept, overflow = ranked[:max_use_cases], ranked[max_use_cases:]
@@ -323,7 +342,7 @@ def cap_use_cases(clusters, max_use_cases):
         "to see them individually.",
         overflow_members,
     )
-    return kept + [other]
+    return _check_partition(sessions, kept + [other], "Use-case cap")
 
 
 MERGE_MAX_DEPTH = 6  # log_50(huge number) is small; this is a sanity backstop, not a real limit.
@@ -398,7 +417,8 @@ def _merge_one_batch(bedrock, chunk_clusters, model_id):
     assigned = set()
 
     for group in merged:
-        ids = [cid for cid in group.get("cluster_ids", []) if cid in by_id]
+        ids = [cid for cid in dict.fromkeys(group.get("cluster_ids", []))
+               if cid in by_id and cid not in assigned]
         member_clusters = [by_id[cid] for cid in ids]
         if not member_clusters:
             continue
