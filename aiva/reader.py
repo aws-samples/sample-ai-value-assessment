@@ -12,6 +12,16 @@ from aiva.pricing import estimate_cost
 INSERT_BATCH_SIZE = 500  # bounds how many full payloads are ever resident at once
 
 
+def s3_key_prefix(prefix, *parts):
+    """Join an S3 key prefix and sub-paths, tolerating empty or slash-padded prefixes.
+
+    Bedrock invocation logging allows an empty key prefix, which writes straight to AWSLogs/.
+    """
+    segments = [seg.strip("/") for seg in (prefix, *parts)]
+    joined = "/".join(seg for seg in segments if seg)
+    return f"{joined}/" if joined else ""
+
+
 def read_invocation_logs_to_store(store, bucket, prefix, region, days, since=None):
     """Read Model Invocation Logs from S3 and write normalised records into `store`.
 
@@ -46,7 +56,7 @@ def read_invocation_logs_to_store(store, bucket, prefix, region, days, since=Non
         cutoff = _coerce_dt(resumed) if resumed else datetime.now(timezone.utc) - timedelta(days=days)
 
     paginator = s3.get_paginator("list_objects_v2")
-    log_prefix = f"{prefix}/AWSLogs/"
+    log_prefix = s3_key_prefix(prefix, "AWSLogs")
 
     # 1. List phase: collect in-window log keys (cheap, listing only).
     wanted = []  # (key, last_modified)
