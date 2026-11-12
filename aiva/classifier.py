@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,6 +43,10 @@ _BEDROCK_CONFIG = Config(retries={"mode": "adaptive", "max_attempts": 10})
 # refusal, truncated or unparseable output). Never counted as STOP/REFINE/EXPAND.
 NOT_ASSESSED = "NOT_ASSESSED"
 NOT_ASSESSED_ACTIVITY = "Not assessed (classification call failed)"
+
+# Whole words only, so "transcript", "description" and "ruled" do not match.
+_DETERMINISTIC_RE = re.compile(
+    r"\b(?:deterministic|regex(?:es)?|scripts?|lookups?|without ai|rules?)\b")
 
 
 def _bedrock_client(region):
@@ -558,8 +563,7 @@ def _apply_verdict_rubric(llm_reco, cluster, cost_opts, parsed):
     # 2. Provably deterministic work the LLM itself flagged (a rule/script fits).
     #    The model signals this by proposing STOP with a deterministic rationale.
     reason_txt = (parsed.get("reasoning", "") or "").lower()
-    if llm_reco == "STOP" and any(w in reason_txt for w in
-                                  ("deterministic", "regex", "script", "lookup", "without ai", "rule")):
+    if llm_reco == "STOP" and _DETERMINISTIC_RE.search(reason_txt):
         return "STOP", "Task looks deterministic - a script/rule would be cheaper and more reliable than a model."
 
     # 3. Negligible + stale: trivial spend and a single one-off session.

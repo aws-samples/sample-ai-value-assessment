@@ -809,3 +809,20 @@ def test_repeated_ids_never_double_count_cost(monkeypatch):
     import pytest
     with pytest.raises(RuntimeError):
         classifier._check_partition(acts, [_build_cluster("x", "", acts + acts[:1])], "test")
+
+
+def test_stop_deterministic_gate_matches_whole_words_only():
+    cluster = _build_cluster("Meeting notes", "", [_stub_activity(i, cost=40, inv=50) for i in range(6)])
+    def verdict(reasoning):
+        parsed = {"recommendation": "STOP", "nature": "repeatable", "reasoning": reasoning}
+        return _apply_verdict_rubric("STOP", cluster, {}, parsed)
+    for text in ("Meeting transcripts are summarised but usage is dropping, STOP.",
+                 "The session description is vague, so we suggest STOP.",
+                 "Team ruled this pilot a failure last quarter, STOP.",
+                 "Subscription renewal emails, STOP."):
+        rec, reason = verdict(text)
+        assert "deterministic" not in reason.lower(), text
+    for text in ("A simple script would do this.", "Rule-based routing fits.",
+                 "A regex covers it.", "Pure lookup work."):
+        rec, reason = verdict(text)
+        assert rec == "STOP" and "deterministic" in reason.lower(), text
