@@ -48,6 +48,8 @@ In the CloudFormation console, create a stack and upload
    pre-flight checks.
 2. Set **SourceBucketName** to your log bucket. Optionally set
    **DestinationBucketName**, or leave it blank to have one generated.
+   **ClassifierModelId** left blank uses the Sonnet 4.6 inference profile for
+   the stack's region (see the Local CLI `--model` default below).
 3. Optionally set **ReportReaderPrincipalArn** to the single IAM identity that
    may read the report. The report contains real prompt and response excerpts.
    Left blank, any principal in the account can read it. Public access is always
@@ -85,6 +87,12 @@ aiva audit \
   --days 7 \
   --output report
 ```
+
+`--model` defaults to the Sonnet 4.6 inference profile for `--region`'s
+geography: `us.` for `us-*`, `eu.` for `eu-*`, `au.` for ap-southeast-2 and
+ap-southeast-4, `apac.` for other `ap-*` regions, and `global.` elsewhere
+(for example `au.anthropic.claude-sonnet-4-6` in Sydney). Pass `--model` to
+use a different model or profile.
 
 This writes `report.html`, `report.md`, and `report.json`. These contain real
 prompt and response excerpts. Treat them as sensitive: do not commit or share
@@ -178,7 +186,8 @@ Bedrock usage is your existing logs; the tool only reads and summarises them.
 The table below is illustrative, not a quote. Model Invocation Logging writes
 one object per Bedrock call, and cost scales with the number of distinct
 sessions, not raw invocation count. Rates are the default classification model,
-Sonnet 4.6, at $3.00 per million input tokens and $15.00 per million output.
+Sonnet 4.6 through a geographic profile, at $3.30 per million input tokens and
+$16.50 per million output ($3.00 and $15.00 through `global.`).
 
 | Log volume (1 week) | Objects / invocations | Distinct sessions | Approx cost to run |
 |---------------------|-----------------------|-------------------|--------------------|
