@@ -546,3 +546,13 @@ def test_otlp_normalised_records_insert_into_store(tmp_path):
     full = store.fetch_full_invocations([rows[0]["id"]])
     assert full[0]["metadata"]["source_format"] == "otlp"
     store.close()
+
+
+def test_s3_key_prefix_handles_empty_and_slashed_prefixes():
+    from aiva.reader import s3_key_prefix
+    assert s3_key_prefix("", "AWSLogs") == "AWSLogs/"
+    assert s3_key_prefix("bedrock-logs", "AWSLogs") == "bedrock-logs/AWSLogs/"
+    assert s3_key_prefix("bedrock-logs/", "AWSLogs") == "bedrock-logs/AWSLogs/"
+    assert s3_key_prefix("a/b", "AWSLogs") == "a/b/AWSLogs/"
+    assert s3_key_prefix("otel/") == "otel/"
+    assert s3_key_prefix("") == ""

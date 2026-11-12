@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 import boto3
 
 from aiva.pricing import estimate_cost
+from aiva.reader import s3_key_prefix
 
 
 INSERT_BATCH_SIZE = 500
@@ -48,7 +49,7 @@ def read_otlp_logs_to_store(store, bucket, prefix, region, days, since=None):
     paginator = s3.get_paginator("list_objects_v2")
 
     wanted = []
-    list_prefix = prefix if prefix.endswith("/") else f"{prefix}/"
+    list_prefix = s3_key_prefix(prefix)
     for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
         for obj in page.get("Contents", []):
             last_modified = obj["LastModified"]

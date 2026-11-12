@@ -10,6 +10,8 @@ so a self-service customer gets one clear answer instead of a support ticket.
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnectionError
 
+from aiva.reader import s3_key_prefix
+
 
 def run_preflight(bucket, prefix, region, model_id, source="bedrock"):
     """Run all checks and return a list of {name, status, detail, hint}.
@@ -134,13 +136,13 @@ def _check_bucket_access(checks, bucket, prefix, region, identity, source="bedro
     })
 
     if source == "otlp":
-        log_prefix = f"{prefix}/"
+        log_prefix = s3_key_prefix(prefix)
         check_name = "OTLP logs present"
         empty_hint = ("This is expected on a brand-new setup. Confirm your OpenTelemetry "
                       "Collector is writing to this prefix; check --prefix if you expected "
                       "data immediately.")
     else:
-        log_prefix = f"{prefix}/AWSLogs/"
+        log_prefix = s3_key_prefix(prefix, "AWSLogs")
         check_name = "Model Invocation Logs present"
         empty_hint = ("This is expected on a brand-new setup. Logging takes a few minutes to "
                       "start appearing after the first Bedrock call; check --prefix if you "
