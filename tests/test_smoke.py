@@ -556,3 +556,19 @@ def test_s3_key_prefix_handles_empty_and_slashed_prefixes():
     assert s3_key_prefix("a/b", "AWSLogs") == "a/b/AWSLogs/"
     assert s3_key_prefix("otel/") == "otel/"
     assert s3_key_prefix("") == ""
+
+
+def test_built_package_includes_every_aiva_subpackage():
+    # A hard-coded package list once dropped aiva.prompts, breaking every non-editable install.
+    import fnmatch
+    import pathlib
+    import tomllib
+    root = pathlib.Path(__file__).resolve().parents[1]
+    config = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["setuptools"]
+    subpackages = {".".join(init.parent.relative_to(root).parts) for init in (root / "aiva").rglob("__init__.py")}
+    if isinstance(config.get("packages"), list):
+        built = set(config["packages"])
+    else:
+        patterns = config["packages"]["find"]["include"]
+        built = {pkg for pkg in subpackages if any(fnmatch.fnmatch(pkg, pat) for pat in patterns)}
+    assert subpackages <= built, subpackages - built
