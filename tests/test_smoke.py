@@ -691,3 +691,25 @@ def test_html_report_allows_only_known_class_values(tmp_path):
     html = out.read_text()
     assert "evil.example" not in html and "<form" not in html and "<b>STOP</b>" not in html
     assert 'class="nature-badge experimental"' in html
+def test_failed_bedrock_calls_never_become_stop():
+    # Throttling or AccessDenied is not evidence the task was unidentifiable.
+    from aiva.classifier import _call_bedrock_json
+
+    class _Throttled:
+        def converse(self, **kwargs):
+            raise RuntimeError("ThrottlingException")
+
+    class _Prose:
+        def converse(self, **kwargs):
+            return {"output": {"message": {"content": [{"text": "I cannot help with that."}]}}}
+
+    assert _call_bedrock_json(_Throttled(), "m", "p") is None
+    assert _call_bedrock_json(_Prose(), "m", "p") == {}
+    session = {"session_id": "s1", "caller": "c", "invocation_ids": [], "first_ts": "", "last_ts": "",
+               "total_cost_usd": 0.0}
+    from aiva import classifier
+    activity = classifier._describe_activity(_Throttled(), session, [], "m")["activity"]
+    assert "not identifiable" not in activity.lower()
+    cluster = {"metrics": {"session_count": 2, "total_cost_usd": 5.0, "invocation_count": 10},
+               "sessions": [{"activity": activity}, {"activity": activity}]}
+    assert _apply_verdict_rubric("REFINE", cluster, {}, {})[0] != "STOP"
