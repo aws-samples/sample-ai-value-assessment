@@ -678,3 +678,16 @@ def test_read_log_file_keeps_every_record_in_a_batched_object():
 
     rows = _read_log_file(_S3(), "b", "AWSLogs/1/BedrockModelInvocationLogs/us-west-2/2026/11/01/00/x.json.gz")
     assert len(rows) == 3
+
+
+def test_html_report_allows_only_known_class_values(tmp_path):
+    # nature comes from the model, which reads untrusted logged prompts.
+    from aiva.html_reporter import generate_html_report
+    a = _assessment()
+    a["nature"] = 'x"><form action="https://evil.example"><button>'
+    a["recommendation"] = "<b>STOP</b>"
+    out = tmp_path / "r.html"
+    generate_html_report([a], str(out))
+    html = out.read_text()
+    assert "evil.example" not in html and "<form" not in html and "<b>STOP</b>" not in html
+    assert 'class="nature-badge experimental"' in html

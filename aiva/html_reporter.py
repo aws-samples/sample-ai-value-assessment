@@ -520,13 +520,15 @@ def _render_use_case_list(assessments, show_samples=False):
 def _render_use_case(a, show_samples=False):
     """One use case: business summary in the header/body, technical view on expand."""
     m = a["metrics"]
-    rec = a["recommendation"].lower()
+    # Model-influenced values go into class attributes: allow only known ones.
+    rec = a["recommendation"].lower() if a["recommendation"] in ("STOP", "REFINE", "EXPAND") else "refine"
     name = a.get("name", "Unnamed use case")
     description = a.get("description", "")
     reasoning = a.get("reasoning", "")
     verdict_reason = a.get("verdict_reason", "")
     session_count = m.get("session_count", 1)
-    nature = a.get("nature", "experimental").lower()
+    nature = str(a.get("nature") or "").lower()
+    nature = nature if nature in ("repeatable", "experimental") else "experimental"
     nature_reasoning = a.get("nature_reasoning", "")
 
     # Surface likely shadow IT: a recurring workflow flagged in its reasoning
@@ -570,7 +572,7 @@ def _render_use_case(a, show_samples=False):
     return f"""
     <div class="use-case" data-category="{category}" data-id="{uc_id}">
         <div class="use-case-header">
-            <span><span class="severity-badge {rec}">{a['recommendation']}</span><span class="nature-badge {nature}">{_escape(nature)}</span>{category_badge}</span>
+            <span><span class="severity-badge {rec}">{rec.upper()}</span><span class="nature-badge {nature}">{_escape(nature)}</span>{category_badge}</span>
             <span class="uc-title">{_escape(name)}<span class="uc-desc">{_escape(description)}</span></span>
             <span class="uc-meta">{session_count} session(s)<br>{m['invocation_count']:,} calls</span>
             <span class="uc-cost">${m['total_cost_usd']:.2f}</span>
@@ -579,7 +581,7 @@ def _render_use_case(a, show_samples=False):
         </div>
         <div class="use-case-body">
             <div class="biz-summary">
-                <div class="verdict-reason"><strong>Why {a['recommendation']}:</strong> {_escape(verdict_reason)}</div>
+                <div class="verdict-reason"><strong>Why {rec.upper()}:</strong> {_escape(verdict_reason)}</div>
                 <div class="why">{_escape(reasoning)}</div>
                 {value_html}
                 {examples_html}
