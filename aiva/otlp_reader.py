@@ -1,5 +1,5 @@
 """Read OpenTelemetry (OTLP-JSON) log exports from S3 and normalise into
-the same record schema as reader.py's Bedrock log reader.
+Invocations. S3, threads and the store live in aiva.ingest.
 
 The OTEL Collector's awss3 exporter (marshaler: otlp_json) writes files
 containing the standard OTLP JSON structure: a top-level object with
@@ -15,113 +15,31 @@ Code includes this). Otherwise it is estimated from token counts and model
 ID using the shared pricing module.
 """
 
-import gzip
-import json
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-import boto3
-
+from aiva.ingest import s3_key_prefix
+from aiva.invocation import Invocation, as_int
 from aiva.pricing import estimate_cost
-from aiva.reader import s3_key_prefix
 
 
-INSERT_BATCH_SIZE = 500
+def log_prefix(prefix):
+    return s3_key_prefix(prefix)
 
 
-def read_otlp_logs_to_store(store, bucket, prefix, region, days, since=None):
-    """Read OTLP-JSON files from S3 and write normalised records into `store`.
+def list_prefixes(s3, bucket, base, cutoff):
+    return [base]
 
-    Same contract as reader.read_invocation_logs_to_store: records are
-    batched into the store as they arrive, peak memory stays bounded.
 
-    Returns newest_iso (max object LastModified, ISO-8601 UTC) or None.
+def wants_key(relative_key):
+    return relative_key.endswith((".json", ".gz", ".jsonl", ".ndjson"))
+
+
+def parse(raw, fetch_body):
+    """Convert one OTLP-JSON export document into Invocations.
+
+    One document may contain multiple resource entries, each with multiple
+    log records, so it can yield many Invocations.
     """
-    s3 = boto3.client("s3", region_name=region)
-
-    if since is not None:
-        cutoff = _coerce_dt(since)
-    else:
-        resumed = store.resume_watermark()
-        cutoff = _coerce_dt(resumed) if resumed else datetime.now(timezone.utc) - timedelta(days=days)
-
-    paginator = s3.get_paginator("list_objects_v2")
-
-    wanted = []
-    list_prefix = s3_key_prefix(prefix)
-    for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
-        for obj in page.get("Contents", []):
-            last_modified = obj["LastModified"]
-            if last_modified <= cutoff:
-                continue
-            key = obj["Key"]
-            if not (key.endswith(".json") or key.endswith(".json.gz") or key.endswith(".gz")):
-                continue
-            wanted.append((key, last_modified))
-
-    if not wanted:
-        return None
-
-    newest = None
-    buffer = []
-
-    _local = threading.local()
-
-    def _client():
-        if not hasattr(_local, "s3"):
-            _local.s3 = boto3.client("s3", region_name=region)
-        return _local.s3
-
-    def _fetch(item):
-        key, lm = item
-        return _read_otlp_file(_client(), bucket, key), key, lm
-
-    max_workers = min(32, max(4, len(wanted)))
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for records, key, lm in pool.map(_fetch, wanted):
-            for i, record in enumerate(records):
-                record_key = f"{key}#record-{i}" if len(records) > 1 else key
-                buffer.append((record, record_key, lm.astimezone(timezone.utc).isoformat()))
-                if newest is None or lm > newest:
-                    newest = lm
-                if len(buffer) >= INSERT_BATCH_SIZE:
-                    store.insert_invocations(buffer)
-                    buffer = []
-
-    if buffer:
-        store.insert_invocations(buffer)
-
-    return newest.astimezone(timezone.utc).isoformat() if newest else None
-
-
-def _coerce_dt(value):
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-def _read_otlp_file(s3, bucket, key):
-    """Read and parse an OTLP-JSON file. Returns a list of normalised records.
-
-    Each file may contain multiple resource entries, each with multiple log
-    records, so one S3 object can yield many normalised invocation records.
-    """
-    response = s3.get_object(Bucket=bucket, Key=key)
-    body = response["Body"].read()
-
-    if key.endswith(".gz"):
-        body = gzip.decompress(body)
-
-    try:
-        raw = json.loads(body.decode("utf-8"))
-    except json.JSONDecodeError:
-        return []
-
     if not isinstance(raw, dict):
         return []
 
@@ -215,8 +133,6 @@ def _normalise_log_record(log_record, resource_attrs):
     response_text = attrs.get("response", attrs.get("gen_ai.completion", ""))
 
     tools = _extract_list_attr(attrs, "tools")
-    tool_name = attrs.get("tool.name", attrs.get("tool_name", ""))
-    tool_calls = [tool_name] if tool_name else []
 
     messages = []
     if user_prompt:
@@ -226,27 +142,26 @@ def _normalise_log_record(log_record, resource_attrs):
 
     service_name = resource_attrs.get("service.name", "")
 
-    return {
-        "timestamp": timestamp,
-        "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cache_read_tokens": cache_read_tokens,
-        "cache_write_tokens": cache_write_tokens,
-        "estimated_cost_usd": cost,
-        "cost_priced": cost_from_source,
-        "system_prompt": system_prompt,
-        "tools": tools,
-        "messages": messages,
-        "response_text": response_text,
-        "tool_calls": tool_calls,
-        "max_tokens": _to_int(attrs.get("gen_ai.request.max_tokens")) or None,
-        "caller": caller,
-        "user_agent": service_name,
-        "operation": event_name or "otlp_log",
-        "request_id": attrs.get("request_id", attrs.get("gen_ai.request.id", "")),
-        "metadata": _build_metadata(attrs, resource_attrs, session_key),
-    }
+    return Invocation(
+        timestamp=timestamp,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        estimated_cost_usd=cost,
+        cost_priced=cost_from_source,
+        system_prompt=system_prompt,
+        tools=tools,
+        messages=messages,
+        response_text=response_text,
+        max_tokens=attrs.get("gen_ai.request.max_tokens"),
+        caller=caller,
+        user_agent=service_name,
+        operation=event_name or "otlp_log",
+        request_id=attrs.get("request_id", attrs.get("gen_ai.request.id", "")),
+        metadata=_build_metadata(attrs, resource_attrs, session_key),
+    )
 
 
 def _normalise_span_record(span, resource_attrs):
@@ -281,8 +196,6 @@ def _normalise_span_record(span, resource_attrs):
     response_text = attrs.get("response", attrs.get("gen_ai.completion", ""))
 
     tools = _extract_list_attr(attrs, "tools")
-    tool_name = attrs.get("tool.name", attrs.get("tool_name", ""))
-    tool_calls = [tool_name] if tool_name else []
 
     messages = []
     if user_prompt:
@@ -290,27 +203,26 @@ def _normalise_span_record(span, resource_attrs):
 
     service_name = resource_attrs.get("service.name", "")
 
-    return {
-        "timestamp": timestamp,
-        "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cache_read_tokens": cache_read_tokens,
-        "cache_write_tokens": cache_write_tokens,
-        "estimated_cost_usd": cost,
-        "cost_priced": cost_from_source,
-        "system_prompt": system_prompt,
-        "tools": tools,
-        "messages": messages,
-        "response_text": response_text,
-        "tool_calls": tool_calls,
-        "max_tokens": _to_int(attrs.get("gen_ai.request.max_tokens")) or None,
-        "caller": caller,
-        "user_agent": service_name,
-        "operation": span_name or "otlp_span",
-        "request_id": attrs.get("request_id", attrs.get("gen_ai.request.id", "")),
-        "metadata": _build_metadata(attrs, resource_attrs, session_key),
-    }
+    return Invocation(
+        timestamp=timestamp,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        estimated_cost_usd=cost,
+        cost_priced=cost_from_source,
+        system_prompt=system_prompt,
+        tools=tools,
+        messages=messages,
+        response_text=response_text,
+        max_tokens=attrs.get("gen_ai.request.max_tokens"),
+        caller=caller,
+        user_agent=service_name,
+        operation=span_name or "otlp_span",
+        request_id=attrs.get("request_id", attrs.get("gen_ai.request.id", "")),
+        metadata=_build_metadata(attrs, resource_attrs, session_key),
+    )
 
 
 def _extract_model_and_tokens(attrs, resource_attrs):
@@ -321,13 +233,13 @@ def _extract_model_and_tokens(attrs, resource_attrs):
              or attrs.get("gen_ai.response.model")
              or resource_attrs.get("gen_ai.request.model")
              or "unknown")
-    input_tokens = _to_int(attrs.get("input_tokens",
+    input_tokens = as_int(attrs.get("input_tokens",
                                       attrs.get("gen_ai.usage.input_tokens", 0)))
-    output_tokens = _to_int(attrs.get("output_tokens",
+    output_tokens = as_int(attrs.get("output_tokens",
                                        attrs.get("gen_ai.usage.output_tokens", 0)))
-    cache_read_tokens = _to_int(attrs.get("cache_read_tokens",
+    cache_read_tokens = as_int(attrs.get("cache_read_tokens",
                                            attrs.get("gen_ai.usage.cache_read_input_tokens", 0)))
-    cache_write_tokens = _to_int(attrs.get("cache_creation_tokens",
+    cache_write_tokens = as_int(attrs.get("cache_creation_tokens",
                                             attrs.get("gen_ai.usage.cache_creation_input_tokens", 0)))
     return model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
 
@@ -425,11 +337,6 @@ def _nano_to_iso(nano):
     except (ValueError, OSError):
         return ""
 
-
-def _to_int(value):
-    """Safely coerce to int, returning 0 on failure."""
-    if value is None:
-        return 0
     try:
         return int(value)
     except (ValueError, TypeError):
