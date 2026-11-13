@@ -47,7 +47,7 @@ def classify_activities(store, sessions, region, model_id):
     Sessions are independent (classifying one never depends on another), so this
     fans out across a thread pool instead of one call at a time. One
     Bedrock client per worker thread (thread-local), same pattern as the S3
-    fetch in reader.py, not one client shared or recreated per session.
+    fetch in ingest.py, not one client shared or recreated per session.
     """
     if not sessions:
         return []

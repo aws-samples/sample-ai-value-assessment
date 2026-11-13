@@ -1,7 +1,7 @@
 """Golden test: de-identified real Bedrock log objects read end to end through
 the S3 reader into the store. Store rows and session grouping must match
 tests/fixtures/bedrock_golden.json, which was recorded from main before the
-ingest refactor.
+ingest refactor (the old reader produced identical output).
 
 Regenerate (only when a change in output is intended):
     python tests/test_golden_ingest.py tests/fixtures/bedrock > tests/fixtures/bedrock_golden.json
@@ -23,9 +23,11 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
 
 def _read(store, s3):
-    from aiva.reader import read_invocation_logs_to_store
+    from aiva.ingest import read_to_store
+    from aiva.sources import SOURCES
     with mock.patch("boto3.client", return_value=s3):
-        return read_invocation_logs_to_store(store, "bucket", "", "ap-southeast-2", 7, since="2026-01-01T00:00:00Z")
+        return read_to_store(store, SOURCES["bedrock"], "bucket", "", "ap-southeast-2", 7,
+                             since="2026-01-01T00:00:00Z").newest
 
 
 def snapshot(root, db_path):

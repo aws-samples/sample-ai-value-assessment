@@ -23,8 +23,8 @@ who needs to stop and restart later) previously meant starting the S3 fetch
 over from zero. Each row is keyed on its S3 object key (UNIQUE, INSERT OR
 IGNORE), so `resume_watermark()` can hand the reader a "resume from here"
 timestamp and re-listing near that boundary is a safe no-op for objects
-already committed, not a duplicate or a data-loss risk. See reader.py's
-`read_invocation_logs_to_store` for how `since` and this watermark compose.
+already committed, not a duplicate or a data-loss risk. See ingest.py's
+`read_to_store` for how `since` and this watermark compose.
 """
 
 import json
@@ -107,7 +107,7 @@ class AuditStore:
 
     def insert_invocations(self, items):
         """Insert a batch of (record, s3_key, last_modified_iso) tuples in one
-        transaction. `record` is reader._normalise_record's output. Call from
+        transaction. `record` is an aiva.invocation.Invocation. Call from
         a single thread only, the S3 fetch's worker threads run concurrently
         but the caller collects their results and inserts on the main thread,
         avoiding concurrent SQLite writers entirely.
@@ -168,8 +168,8 @@ class AuditStore:
         return [dict(zip(_LIGHT_COLUMNS, row)) for row in cur.fetchall()]
 
     def fetch_full_invocations(self, ids):
-        """Return full invocation dicts (same shape as reader._normalise_record's
-        output) for the given row ids, ordered to match insertion order.
+        """Return full invocation dicts (the Invocation fields plus the row id)
+        for the given row ids, ordered to match insertion order.
         Called once per session, from a Pass-1 worker thread, so at most
         PASS1_MAX_WORKERS sessions' full payloads are resident at once.
 
@@ -214,45 +214,41 @@ def _session_key(record):
     same fallback rule as before, just evaluated once at write time instead
     of on every grouping pass.
     """
-    md = record.get("metadata")
-    if not isinstance(md, dict):
-        return None
     for key in _SESSION_ID_KEYS:
-        val = md.get(key)
+        val = record.metadata.get(key)
         if val:
             return str(val)
     return None
 
 
 def _is_audit_overhead(record):
-    md = record.get("metadata")
-    return isinstance(md, dict) and md.get("source") == "aiva-audit"
+    return record.metadata.get("source") == "aiva-audit"
 
 
 def _to_row(record, s3_key, last_modified):
     payload = json.dumps({
-        "system_prompt": record.get("system_prompt", ""),
-        "tools": record.get("tools", []),
-        "messages": record.get("messages", []),
-        "response_text": record.get("response_text", ""),
-        "user_agent": record.get("user_agent", ""),
-        "metadata": record.get("metadata", {}),
+        "system_prompt": record.system_prompt,
+        "tools": record.tools,
+        "messages": record.messages,
+        "response_text": record.response_text,
+        "user_agent": record.user_agent,
+        "metadata": record.metadata,
     })
     return (
         s3_key,
         last_modified,
-        record.get("timestamp", ""),
-        record.get("model", "unknown"),
-        record.get("input_tokens", 0),
-        record.get("output_tokens", 0),
-        record.get("cache_read_tokens", 0),
-        record.get("cache_write_tokens", 0),
-        record.get("estimated_cost_usd", 0.0),
-        1 if record.get("cost_priced") else 0,
-        record.get("caller", "unknown"),
-        record.get("operation", "unknown"),
-        record.get("request_id", ""),
-        record.get("max_tokens"),
+        record.timestamp,
+        record.model,
+        record.input_tokens,
+        record.output_tokens,
+        record.cache_read_tokens,
+        record.cache_write_tokens,
+        record.estimated_cost_usd,
+        1 if record.cost_priced else 0,
+        record.caller,
+        record.operation,
+        record.request_id,
+        record.max_tokens,
         _session_key(record),
         1 if _is_audit_overhead(record) else 0,
         payload,

@@ -7,12 +7,12 @@ from rich.console import Console
 
 from datetime import datetime, timezone
 
-from aiva.reader import read_invocation_logs_to_store
-from aiva.otlp_reader import read_otlp_logs_to_store
+from aiva.ingest import read_to_store
 from aiva.classifier import classify_activities, cluster_use_cases, classify_use_cases, cap_use_cases
 from aiva.reporter import generate_report, generate_json_report
 from aiva.html_reporter import generate_html_report
 from aiva.preflight import run_preflight
+from aiva.sources import SOURCES
 from aiva.store import AuditStore
 
 console = Console()
@@ -35,20 +35,15 @@ def main():
 @click.option("--output", default="report", help="Output file path (without extension)")
 @click.option("--format", "fmt", default="all", type=click.Choice(["html", "md", "json", "both", "all"]), help="Output format (all = html+md+json)")
 @click.option("--model", default="global.anthropic.claude-sonnet-4-6", show_default=True, help="Bedrock model ID or inference profile ID/ARN for classification")
-@click.option("--source", default="bedrock", type=click.Choice(["bedrock", "otlp"]), help="Log source format: bedrock (Model Invocation Logs) or otlp (OpenTelemetry JSON)")
+@click.option("--source", default="bedrock", type=click.Choice(list(SOURCES)), help="Log source format: bedrock (Model Invocation Logs) or otlp (OpenTelemetry JSON)")
 @click.option("--skip-preflight", is_flag=True, default=False, help="Skip credential/bucket/model access checks (not recommended)")
 @click.option("--db", default=None, help="Path to the local SQLite store (default: a temp file, deleted after the run)")
 @click.option("--max-use-cases", default=50, type=int, help="Cap on named use cases (Pass 2b calls); overflow rolls into one 'Other' cluster. Set above your expected use-case count, cost per extra slot is a fraction of a cent")
 @click.option("--show-samples", is_flag=True, default=False, help="Include raw prompt/response samples in the report (off by default to protect employee privacy)")
 def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflight, db, max_use_cases, show_samples):
     """Run a full audit on Model Invocation Logs."""
-    match source:
-        case "otlp":
-            source_label = "OTLP Telemetry"
-        case _:
-            source_label = "Bedrock Model Invocation Logs"
     console.print(f"\n[bold]AI Value Assessment Audit[/bold]")
-    console.print(f"  Source: {source_label}")
+    console.print(f"  Source: {SOURCES[source].label}")
     console.print(f"  Bucket: s3://{bucket}/{prefix}")
     console.print(f"  Region: {region}")
     console.print(f"  Window: last {days} days")
@@ -93,13 +88,11 @@ def _run_audit(bucket, prefix, region, days, output, fmt, model, source, db_path
 
 def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, source, max_use_cases, show_samples):
     # Step 1: Read logs from S3, streamed into the store in batches.
-    match source:
-        case "otlp":
-            console.print("[1/5] Reading OTLP telemetry logs from S3...")
-            read_otlp_logs_to_store(store, bucket, prefix, region, days)
-        case _:
-            console.print("[1/5] Reading invocation logs from S3...")
-            read_invocation_logs_to_store(store, bucket, prefix, region, days)
+    console.print(f"[1/5] Reading {SOURCES[source].reading} from S3...")
+    result = read_to_store(store, SOURCES[source], bucket, prefix, region, days)
+    if result.skipped:
+        console.print(f"  [yellow]Skipped {len(result.skipped)} unreadable objects or records, "
+                      f"first: {result.skipped[0][0]} ({result.skipped[0][1]})[/yellow]")
     light_rows = store.fetch_light_rows()
     console.print(f"  Found {len(light_rows)} invocations")
 

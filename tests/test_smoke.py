@@ -14,9 +14,10 @@ from aiva.classifier import _apply_verdict_rubric, project_monthly_cost, cap_use
 from aiva.html_reporter import _use_case_id, generate_html_report
 from aiva.otlp_reader import (
     _normalise_log_record, _normalise_span_record,
-    _extract_resource_attrs, _nano_to_iso, _read_otlp_file,
+    _extract_resource_attrs, _nano_to_iso,
 )
 from aiva.reporter import generate_report, generate_json_report
+from aiva.invocation import Invocation
 from aiva.store import AuditStore
 
 
@@ -321,16 +322,15 @@ def test_json_report_generates_and_is_valid_json(tmp_path):
 
 def _record(caller="user-a", cost=0.05, overhead=False):
     metadata = {"source": "aiva-audit"} if overhead else {"session_id": "sess-1"}
-    return {
-        "timestamp": "2026-01-01T00:00:00Z", "model": "claude-sonnet-4-6",
-        "input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0,
-        "cache_write_tokens": 0, "estimated_cost_usd": cost, "cost_priced": True,
-        "caller": caller, "operation": "Converse", "request_id": "req-1",
-        "max_tokens": 1000, "metadata": metadata,
-        "system_prompt": "You are a helpful assistant.",
-        "tools": [], "messages": [{"role": "user", "content": "hello"}],
-        "response_text": "hi there", "user_agent": "test-agent",
-    }
+    return Invocation(
+        timestamp="2026-01-01T00:00:00Z", model="claude-sonnet-4-6",
+        input_tokens=100, output_tokens=50, estimated_cost_usd=cost, cost_priced=True,
+        caller=caller, operation="Converse", request_id="req-1",
+        max_tokens=1000, metadata=metadata,
+        system_prompt="You are a helpful assistant.",
+        messages=[{"role": "user", "content": "hello"}],
+        response_text="hi there", user_agent="test-agent",
+    )
 
 
 def test_store_fetch_light_rows_excludes_overhead_and_matches_column_order(tmp_path):
@@ -433,14 +433,14 @@ def test_otlp_normalise_log_record_with_token_counts():
     )
 
     assert record is not None
-    assert record["model"] == "claude-sonnet-4-6"
-    assert record["input_tokens"] == 1000
-    assert record["output_tokens"] == 200
-    assert record["caller"] == "test-user"
-    assert record["cost_priced"] is False  # OTLP cost is always an estimate
-    assert record["estimated_cost_usd"] > 0
-    assert record["metadata"]["session_id"] == "sess-123"
-    assert record["metadata"]["source_format"] == "otlp"
+    assert record.model == "claude-sonnet-4-6"
+    assert record.input_tokens == 1000
+    assert record.output_tokens == 200
+    assert record.caller == "test-user"
+    assert record.cost_priced is False  # OTLP cost is always an estimate
+    assert record.estimated_cost_usd > 0
+    assert record.metadata["session_id"] == "sess-123"
+    assert record.metadata["source_format"] == "otlp"
 
 
 def test_otlp_normalise_log_record_unknown_caller_when_no_enduser():
@@ -456,7 +456,7 @@ def test_otlp_normalise_log_record_unknown_caller_when_no_enduser():
     )
 
     assert record is not None
-    assert record["caller"] == "unknown"
+    assert record.caller == "unknown"
 
 
 def test_otlp_normalise_log_record_filters_irrelevant_events():
@@ -486,9 +486,9 @@ def test_otlp_normalise_log_record_captures_prompt_content():
     )
 
     assert record is not None
-    assert len(record["messages"]) == 1
-    assert record["messages"][0]["content"] == "Explain how S3 bucket policies work"
-    assert "S3 bucket policies" in record["response_text"]
+    assert len(record.messages) == 1
+    assert record.messages[0]["content"] == "Explain how S3 bucket policies work"
+    assert "S3 bucket policies" in record.response_text
 
 
 def test_otlp_normalise_span_record():
@@ -508,10 +508,10 @@ def test_otlp_normalise_span_record():
     record = _normalise_span_record(span, resource_attrs)
 
     assert record is not None
-    assert record["model"] == "claude-opus-4-6"
-    assert record["input_tokens"] == 5000
-    assert record["caller"] == "span-user"
-    assert record["operation"] == "claude_code.llm_request"
+    assert record.model == "claude-opus-4-6"
+    assert record.input_tokens == 5000
+    assert record.caller == "span-user"
+    assert record.operation == "claude_code.llm_request"
 
 
 def test_otlp_nano_to_iso():
@@ -550,7 +550,7 @@ def test_otlp_normalised_records_insert_into_store(tmp_path):
 
 
 def test_s3_key_prefix_handles_empty_and_slashed_prefixes():
-    from aiva.reader import s3_key_prefix
+    from aiva.ingest import s3_key_prefix
     assert s3_key_prefix("", "AWSLogs") == "AWSLogs/"
     assert s3_key_prefix("bedrock-logs", "AWSLogs") == "bedrock-logs/AWSLogs/"
     assert s3_key_prefix("bedrock-logs/", "AWSLogs") == "bedrock-logs/AWSLogs/"
@@ -592,24 +592,24 @@ class _FakeDelimiterS3:
         yield {"CommonPrefixes": [{"Prefix": p} for p in subdirs]}
 
 
-def test_day_prefixes_lists_only_days_since_cutoff():
+def test_bedrock_list_prefixes_lists_only_days_since_cutoff():
     from datetime import datetime, timedelta, timezone
-    from aiva.reader import _day_prefixes
+    from aiva.reader import list_prefixes
     root = "logs/AWSLogs/"
     s3 = _FakeDelimiterS3([f"{root}111/BedrockModelInvocationLogs/us-west-2/2026/01/01/00/a.json.gz"])
     cutoff = datetime.now(timezone.utc) - timedelta(days=2)
-    prefixes = _day_prefixes(s3, "b", root, cutoff)
+    prefixes = list_prefixes(s3, "b", root, cutoff)
     # cutoff day minus one, through today.
     assert len(prefixes) == 4
     assert all(p.startswith(f"{root}111/BedrockModelInvocationLogs/us-west-2/") for p in prefixes)
     assert prefixes[-1].endswith(datetime.now(timezone.utc).strftime("%Y/%m/%d/"))
 
 
-def test_day_prefixes_falls_back_to_whole_prefix():
+def test_bedrock_list_prefixes_falls_back_to_whole_prefix():
     from datetime import datetime, timezone
-    from aiva.reader import _day_prefixes
+    from aiva.reader import list_prefixes
     s3 = _FakeDelimiterS3(["logs/AWSLogs/custom-layout/x.json"])
-    assert _day_prefixes(s3, "b", "logs/AWSLogs/", datetime.now(timezone.utc)) == ["logs/AWSLogs/"]
+    assert list_prefixes(s3, "b", "logs/AWSLogs/", datetime.now(timezone.utc)) == ["logs/AWSLogs/"]
 
 
 def test_pricing_matches_published_bedrock_rates():
@@ -635,34 +635,13 @@ def test_pricing_opus_5_5_cache_read_rate():
     assert abs(cost - 0.20) < 1e-9
 
 
-def test_read_log_file_returns_every_record_in_object():
-    import gzip as _gzip
-    from aiva.reader import _read_log_file
-
-    def rec(rid):
-        return json.dumps({"modelId": "us.anthropic.claude-opus-5-5", "requestId": rid, "operation": "InvokeModel",
-                           "input": {"inputTokenCount": 10, "inputBodyJson": {"messages": []}},
-                           "output": {"outputTokenCount": 5, "outputBodyJson": {}}}, indent=1)
-
-    body = _gzip.compress(("\n".join(rec(f"r{i}") for i in range(3)) + "\n").encode())
-
-    class _S3:
-        def get_object(self, Bucket, Key):
-            class _B:
-                def read(self_inner):
-                    return body
-            return {"Body": _B()}
-
-    records = _read_log_file(_S3(), "b", "k.json.gz")
-    assert [r["request_id"] for r in records] == ["r0", "r1", "r2"]
-
-
-def test_read_log_file_keeps_every_record_in_a_batched_object():
+def test_read_object_keeps_every_record_in_a_batched_object():
     # Model Invocation Logging writes several records per object; each must survive.
     import gzip
     import io
     import json
-    from aiva.reader import _read_log_file
+    from aiva.ingest import _read_object
+    from aiva.sources import SOURCES
 
     def record(i):
         return {"timestamp": f"2026-11-01T00:00:0{i}Z", "requestId": str(i),
@@ -676,8 +655,8 @@ def test_read_log_file_keeps_every_record_in_a_batched_object():
         def get_object(self, Bucket, Key):
             return {"Body": io.BytesIO(body)}
 
-    rows = _read_log_file(_S3(), "b", "AWSLogs/1/BedrockModelInvocationLogs/us-west-2/2026/11/01/00/x.json.gz")
-    assert len(rows) == 3
+    rows, skipped = _read_object(_S3(), SOURCES["bedrock"], "b", "AWSLogs/1/BedrockModelInvocationLogs/us-west-2/2026/11/01/00/x.json.gz")
+    assert [r.request_id for r in rows] == ["0", "1", "2"] and skipped == []
 
 
 def test_html_report_allows_only_known_class_values(tmp_path):
