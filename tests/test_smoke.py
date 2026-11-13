@@ -1193,3 +1193,38 @@ def test_auditor_identity_falls_back_to_none_when_sts_fails(monkeypatch):
     assert cli._auditor_identity("us-west-2") is None
     monkeypatch.setattr(cli.boto3, "client", lambda *a, **kw: _Sts())
     assert cli._auditor_identity("us-west-2") == "arn:aws:sts::1:assumed-role/R/s"
+
+
+def test_audit_usage_prices_every_call_including_truncated_ones():
+    from aiva.classifier import _call_bedrock_json, audit_usage
+
+    class _Metered:
+        def __init__(self, stops):
+            self.stops = list(stops)
+
+        def converse(self, **kwargs):
+            return {"output": {"message": {"content": [{"text": '{"ok": 1}'}]}}, "stopReason": self.stops.pop(0),
+                    "usage": {"inputTokens": 1_000_000, "outputTokens": 100_000}}
+
+    model = "global.anthropic.claude-sonnet-4-6"
+    bedrock = _Metered(["end_turn", "max_tokens"])
+    assert _call_bedrock_json(bedrock, model, "p", audit_nonce="run-a") == {"ok": 1}
+    assert _call_bedrock_json(bedrock, model, "p", audit_nonce="run-a") is None
+    usage = audit_usage("run-a")
+    # Sonnet 4.6 global: $3 in, $15 out per 1M tokens, so $4.50 per call.
+    assert usage["invocation_count"] == 2 and usage["unpriced_count"] == 0
+    assert abs(usage["total_cost_usd"] - 9.0) < 1e-9
+    assert audit_usage("run-b")["invocation_count"] == 0
+
+
+def test_reports_show_audit_cost_only_when_given(tmp_path):
+    from aiva.html_reporter import generate_html_report
+    from aiva.reporter import generate_report
+    cost = {"invocation_count": 142, "total_cost_usd": 1.84, "unpriced_count": 0}
+    generate_html_report([_assessment()], str(tmp_path / "a.html"), audit_cost=cost)
+    generate_report([_assessment()], str(tmp_path / "a.md"), audit_cost=cost)
+    html, md = (tmp_path / "a.html").read_text(), (tmp_path / "a.md").read_text()
+    assert "Audit Cost" in html and "$1.84" in html and "142 Bedrock calls" in html
+    assert "| Audit cost (this report) | $1.84 (142 Bedrock calls) |" in md
+    generate_html_report([_assessment()], str(tmp_path / "b.html"))
+    assert "Audit Cost" not in (tmp_path / "b.html").read_text()

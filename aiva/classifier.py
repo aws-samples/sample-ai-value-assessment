@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import boto3
 from botocore.config import Config
 
-from aiva.pricing import get_pricing
+from aiva.pricing import estimate_cost, get_pricing
 from aiva.prompts.common import make_nonce, untrusted_entry
 from aiva.prompts.pass1_describe import Pass1DescribePrompt
 from aiva.prompts.pass2a_cluster import Pass2aClusterPrompt
@@ -854,6 +854,30 @@ def _extract_real_user_text(content):
     return ""
 
 
+_usage_lock = threading.Lock()
+_usage_by_run = {}
+
+
+def audit_usage(audit_nonce):
+    """Bedrock calls this run has made and their cost, shaped like use case metrics."""
+    with _usage_lock:
+        return dict(_usage_by_run.get(audit_nonce, _empty_usage()))
+
+
+def _empty_usage():
+    return {"invocation_count": 0, "total_cost_usd": 0.0, "unpriced_count": 0}
+
+
+def _record_usage(audit_nonce, model_id, usage):
+    cost, priced = estimate_cost(usage.get("inputTokens", 0), usage.get("outputTokens", 0), model_id,
+                                 usage.get("cacheReadInputTokens", 0), usage.get("cacheWriteInputTokens", 0))
+    with _usage_lock:
+        totals = _usage_by_run.setdefault(audit_nonce, _empty_usage())
+        totals["invocation_count"] += 1
+        totals["total_cost_usd"] += cost
+        totals["unpriced_count"] += 0 if priced else 1
+
+
 def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, audit_nonce=None):
     """Invoke Bedrock and parse a JSON object response.
 
@@ -875,6 +899,8 @@ def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, audit_nonce=N
             "requestMetadata": request_metadata,
         }
         response = bedrock.converse(**kwargs)
+        # Billed even when the reply is truncated or unusable.
+        _record_usage(audit_nonce, model_id, response.get("usage") or {})
         if response.get("stopReason") == "max_tokens":
             return None
         text = response["output"]["message"]["content"][0]["text"]
