@@ -57,11 +57,8 @@ Parameters:
       Code or Cowork via an OTEL Collector with the awss3 exporter).
   ClassifierModelId:
     Type: String
-    Default: ""
-    Description: >-
-      Optional. Bedrock model ID (inference profile) used to classify usage.
-      Leave blank to use the Sonnet 4.6 profile for this region's geography
-      (us., eu., au., apac., or global.).
+    Default: global.anthropic.claude-sonnet-4-6
+    Description: Bedrock model ID or inference profile ID used to classify usage.
   DestinationBucketName:
     Type: String
     Default: ""
@@ -92,7 +89,6 @@ Parameters:
 Conditions:
   HasDestinationBucketName: !Not [!Equals [!Ref DestinationBucketName, ""]]
   HasReportReaderPrincipalArn: !Not [!Equals [!Ref ReportReaderPrincipalArn, ""]]
-  HasClassifierModelId: !Not [!Equals [!Ref ClassifierModelId, ""]]
   HasSourceBucketKmsKeyArn: !Not [!Equals [!Ref SourceBucketKmsKeyArn, ""]]
 
 Resources:
@@ -335,36 +331,32 @@ Resources:
         Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
       Source:
         Type: NO_SOURCE
-        BuildSpec: !Sub
-          - |
-            version: 0.2
-            phases:
-              install:
-                runtime-versions:
-                  python: 3.11
-                commands:
-                  - pip install --quiet "${PackageSourceUrl}"
-              build:
-                commands:
-                  - echo "Running AI Value Assessment audit on s3://${SourceBucketName}/${SourceBucketPrefix}"
-                  - aiva audit
-                      --bucket "${SourceBucketName}"
-                      --prefix "${SourceBucketPrefix}"
-                      --region "${AWS::Region}"
-                      --days ${WindowDays}
-                      --source "${SourceFormat}" ${ModelArg}
-                      --max-use-cases ${MaxUseCases}
-                      --output /tmp/report
-              post_build:
-                commands:
-                  - aws s3 cp /tmp/report.html "s3://${DestinationBucket}/report.html"
-                  - aws s3 cp /tmp/report.md "s3://${DestinationBucket}/report.md"
-                  - aws s3 cp /tmp/report.json "s3://${DestinationBucket}/report.json"
-                  - echo "Report written to s3://${DestinationBucket}/"
-          - ModelArg: !If
-              - HasClassifierModelId
-              - !Sub '--model "${ClassifierModelId}"'
-              - ""
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                python: 3.11
+              commands:
+                - pip install --quiet "${PackageSourceUrl}"
+            build:
+              commands:
+                - echo "Running AI Value Assessment audit on s3://${SourceBucketName}/${SourceBucketPrefix}"
+                - aiva audit
+                    --bucket "${SourceBucketName}"
+                    --prefix "${SourceBucketPrefix}"
+                    --region "${AWS::Region}"
+                    --days ${WindowDays}
+                    --source "${SourceFormat}"
+                    --model "${ClassifierModelId}"
+                    --max-use-cases ${MaxUseCases}
+                    --output /tmp/report
+            post_build:
+              commands:
+                - aws s3 cp /tmp/report.html "s3://${DestinationBucket}/report.html"
+                - aws s3 cp /tmp/report.md "s3://${DestinationBucket}/report.md"
+                - aws s3 cp /tmp/report.json "s3://${DestinationBucket}/report.json"
+                - echo "Report written to s3://${DestinationBucket}/"
       LogsConfig:
         CloudWatchLogs:
           Status: ENABLED

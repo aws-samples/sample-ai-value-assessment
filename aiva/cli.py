@@ -19,22 +19,7 @@ console = Console()
 
 _STATUS_STYLE = {"pass": "green", "warn": "yellow", "fail": "red"}
 _STATUS_MARK = {"pass": "[ok]", "warn": "[warn]", "fail": "[FAIL]"}
-DEFAULT_BASE_MODEL = "anthropic.claude-sonnet-4-6"
-
-
-def default_model_for_region(region):
-    """Cross-region inference profile for `region`: a us. profile cannot be called from Sydney or the EU."""
-    if region.startswith("us-"):
-        geo = "us"
-    elif region.startswith("eu-"):
-        geo = "eu"
-    elif region in ("ap-southeast-2", "ap-southeast-4"):
-        geo = "au"
-    elif region.startswith("ap-"):
-        geo = "apac"
-    else:
-        geo = "global"
-    return f"{geo}.{DEFAULT_BASE_MODEL}"
+DEFAULT_MODEL = "global.anthropic.claude-sonnet-4-6"
 
 
 @click.group()
@@ -50,7 +35,7 @@ def main():
 @click.option("--days", default=7, type=int, help="Number of days of logs to analyse")
 @click.option("--output", default="report", help="Output file path (without extension)")
 @click.option("--format", "fmt", default="all", type=click.Choice(["html", "md", "json", "both", "all"]), help="Output format (all = html+md+json)")
-@click.option("--model", default=None, help="Bedrock model ID (inference profile) for classification (default: Sonnet 4.6 profile for --region's geography)")
+@click.option("--model", default=DEFAULT_MODEL, show_default=True, help="Bedrock model ID or inference profile ID used for classification")
 @click.option("--source", default="bedrock", type=click.Choice(["bedrock", "otlp"]), help="Log source format: bedrock (Model Invocation Logs) or otlp (OpenTelemetry JSON)")
 @click.option("--skip-preflight", is_flag=True, default=False, help="Skip credential/bucket/model access checks (not recommended)")
 @click.option("--db", default=None, help="Path to the local SQLite store (default: a temp file, deleted after the run)")
@@ -58,7 +43,6 @@ def main():
 @click.option("--show-samples", is_flag=True, default=False, help="Include raw prompt/response samples in the report (off by default to protect employee privacy)")
 def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflight, db, max_use_cases, show_samples):
     """Run a full audit on Model Invocation Logs."""
-    model = model or default_model_for_region(region)
     match source:
         case "otlp":
             source_label = "OTLP Telemetry"

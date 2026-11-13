@@ -48,8 +48,8 @@ In the CloudFormation console, create a stack and upload
    pre-flight checks.
 2. Set **SourceBucketName** to your log bucket. Optionally set
    **DestinationBucketName**, or leave it blank to have one generated.
-   **ClassifierModelId** left blank uses the Sonnet 4.6 inference profile for
-   the stack's region (see the Local CLI `--model` default below).
+   **ClassifierModelId** is the Bedrock model ID or inference profile ID used
+   for classification (default `global.anthropic.claude-sonnet-4-6`).
    If the log bucket uses SSE-KMS with a customer managed key, set
    **SourceBucketKmsKeyArn** to that key's ARN. The role then gets
    `kms:Decrypt` on that key only, and only through S3 in this region. The key
@@ -93,11 +93,8 @@ aiva audit \
   --output report
 ```
 
-`--model` defaults to the Sonnet 4.6 inference profile for `--region`'s
-geography: `us.` for `us-*`, `eu.` for `eu-*`, `au.` for ap-southeast-2 and
-ap-southeast-4, `apac.` for other `ap-*` regions, and `global.` elsewhere
-(for example `au.anthropic.claude-sonnet-4-6` in Sydney). Pass `--model` to
-use a different model or profile.
+`--model` takes any Bedrock model ID or inference profile ID available in
+`--region` (default `global.anthropic.claude-sonnet-4-6`).
 
 This writes `report.html`, `report.md`, and `report.json`. These contain real
 prompt and response excerpts. Treat them as sensitive: do not commit or share
@@ -191,8 +188,8 @@ Bedrock usage is your existing logs; the tool only reads and summarises them.
 The table below is illustrative, not a quote. Model Invocation Logging writes
 one object per Bedrock call, and cost scales with the number of distinct
 sessions, not raw invocation count. Rates are the default classification model,
-Sonnet 4.6 through a geographic profile, at $3.30 per million input tokens and
-$16.50 per million output ($3.00 and $15.00 through `global.`).
+`global.anthropic.claude-sonnet-4-6`, at $3.00 per million input tokens and
+$15.00 per million output.
 
 | Log volume (1 week) | Objects / invocations | Distinct sessions | Approx cost to run |
 |---------------------|-----------------------|-------------------|--------------------|

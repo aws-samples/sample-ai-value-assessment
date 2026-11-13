@@ -680,35 +680,18 @@ def test_read_log_file_keeps_every_record_in_a_batched_object():
     assert len(rows) == 3
 
 
-def test_default_model_follows_region_geography(monkeypatch):
-    # A us. profile cannot be called from Sydney or the EU, so the default must follow --region.
-    from click.testing import CliRunner
-    import aiva.cli as cli
-    seen = {}
-    monkeypatch.setattr(cli, "_run_audit", lambda *a: seen.__setitem__(a[2], a[6]))
-    expected = {"us-west-2": "us.", "eu-central-1": "eu.", "ap-southeast-2": "au.", "ap-southeast-4": "au.",
-                "ap-northeast-1": "apac.", "ca-central-1": "global.", "sa-east-1": "global."}
-    for region in expected:
-        result = CliRunner().invoke(cli.main, ["audit", "--bucket", "b", "--region", region, "--skip-preflight"])
-        assert result.exit_code == 0, result.output
-    assert seen == {r: f"{g}anthropic.claude-sonnet-4-6" for r, g in expected.items()}
-    CliRunner().invoke(cli.main, ["audit", "--bucket", "b", "--region", "us-east-1", "--skip-preflight", "--model", "x"])
-    assert seen["us-east-1"] == "x"
-
-
 def _template_text():
     import pathlib
     return (pathlib.Path(__file__).resolve().parents[1] / "cloudformation" / "deploy.yaml").read_text()
 
 
-def test_template_derives_model_from_region_unless_set():
+def test_cli_and_template_share_one_default_model():
     import re
+    from aiva.cli import DEFAULT_MODEL
     text = _template_text()
     param = re.search(r"\n  ClassifierModelId:\n(.*?)\n  \w", text, re.S).group(1)
-    assert 'Default: ""' in param
-    assert '--model "${ClassifierModelId}"\n' not in text
-    assert 'HasClassifierModelId: !Not [!Equals [!Ref ClassifierModelId, ""]]' in text
-    assert re.search(r"ModelArg: !If\n\s+- HasClassifierModelId\n\s+- !Sub '--model \"\$\{ClassifierModelId\}\"'\n\s+- \"\"", text)
+    assert f"Default: {DEFAULT_MODEL}" in param
+    assert '--model "${ClassifierModelId}"\n' in text
 
 
 def test_template_grants_kms_decrypt_only_on_the_given_key_via_s3():
