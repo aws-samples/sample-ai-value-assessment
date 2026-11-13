@@ -678,3 +678,17 @@ def test_read_log_file_keeps_every_record_in_a_batched_object():
 
     rows = _read_log_file(_S3(), "b", "AWSLogs/1/BedrockModelInvocationLogs/us-west-2/2026/11/01/00/x.json.gz")
     assert len(rows) == 3
+
+
+def test_template_model_default_kms_and_profile_permissions():
+    import pathlib
+    import re
+    from aiva.cli import audit
+    text = (pathlib.Path(__file__).resolve().parents[1] / "cloudformation" / "deploy.yaml").read_text()
+    cli_default = next(p.default for p in audit.params if p.name == "model")
+    assert cli_default == "global.anthropic.claude-sonnet-4-6"
+    assert f"Default: {cli_default}" in re.search(r"\n  ClassifierModelId:\n(.*?)\n  \w", text, re.S).group(1)
+    assert '!Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:application-inference-profile/*"' in text
+    kms = text.split("PolicyName: DecryptSourceLogs")[1].split("!Ref AWS::NoValue")[0]
+    assert "Action: kms:Decrypt" in kms and "Resource: !Ref SourceBucketKmsKeyArn" in kms
+    assert 'kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"' in kms
