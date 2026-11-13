@@ -801,3 +801,10 @@ def test_zero_invocations_still_writes_every_report_the_buildspec_uploads(monkey
     for ext in uploaded:
         assert (tmp_path / f"report.{ext}").stat().st_size > 0, ext
     assert json.loads((tmp_path / "report.json").read_text())
+
+
+def test_template_lets_the_audit_role_use_its_own_application_profiles():
+    text = _template_text()
+    own = '!Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:application-inference-profile/*"'
+    invoke = text.split("Sid: InvokeBedrockForClassification")[1].split("PolicyName:")[0]
+    assert own in invoke

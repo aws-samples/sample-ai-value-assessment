@@ -48,8 +48,9 @@ In the CloudFormation console, create a stack and upload
    pre-flight checks.
 2. Set **SourceBucketName** to your log bucket. Optionally set
    **DestinationBucketName**, or leave it blank to have one generated.
-   **ClassifierModelId** is the Bedrock model ID or inference profile ID used
-   for classification (default `global.anthropic.claude-sonnet-4-6`).
+   **ClassifierModelId** is the Bedrock model ID, inference profile ID, or
+   application inference profile ARN used for classification (default
+   `global.anthropic.claude-sonnet-4-6`).
    If the log bucket uses SSE-KMS with a customer managed key, set
    **SourceBucketKmsKeyArn** to that key's ARN. The role then gets
    `kms:Decrypt` on that key only, and only through S3 in this region. The key
@@ -93,8 +94,9 @@ aiva audit \
   --output report
 ```
 
-`--model` takes any Bedrock model ID or inference profile ID available in
-`--region` (default `global.anthropic.claude-sonnet-4-6`).
+`--model` takes any Bedrock model ID, inference profile ID, or application
+inference profile ARN available in `--region` (default
+`global.anthropic.claude-sonnet-4-6`).
 
 This writes `report.html`, `report.md`, and `report.json`. These contain real
 prompt and response excerpts. Treat them as sensitive: do not commit or share
