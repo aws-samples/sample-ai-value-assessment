@@ -130,8 +130,9 @@ _REPORT_STYLE = """
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
             gap: 16px;
-            margin-bottom: 32px;
+            margin-bottom: 16px;
         }
+        .summary-grid + .summary-grid { margin-bottom: 32px; }
         .card {
             background: #161b22;
             border: 1px solid #21262d;
@@ -139,7 +140,8 @@ _REPORT_STYLE = """
             padding: 20px;
         }
         .card .label { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .card .value { font-size: 28px; font-weight: 700; margin-top: 4px; color: #f0f6fc; }
+        .card .value { font-size: clamp(22px, 2vw, 28px); font-weight: 700; margin-top: 4px; color: #f0f6fc; }
+        .card .sub { color: #8b949e; font-size: 12px; margin-top: 2px; }
         .card .value.stop { color: #f85149; }
         .card .value.refine { color: #d29922; }
         .card .value.expand { color: #3fb950; }
@@ -403,7 +405,7 @@ def _use_case_id(a):
     return "uc_" + hashlib.sha256(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
-def generate_html_report(assessments, output_path, show_samples=False, source="bedrock"):
+def generate_html_report(assessments, output_path, show_samples=False, source="bedrock", audit_cost=None):
     """Generate a use-case HTML dashboard: Business summary + Technical drill-down.
 
     Each assessment is a de-duplicated business USE CASE that may span several
@@ -420,6 +422,9 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
     not_assessed = [a for a in assessments if a["recommendation"] == "NOT_ASSESSED"]
     not_assessed_card = (f'<div class="card"><div class="label">Not Assessed</div>'
                          f'<div class="value">{len(not_assessed)}</div></div>') if not_assessed else ""
+    audit_cost_card = (f'<div class="card"><div class="label">Audit Cost</div>'
+                       f'<div class="value">{_escape(format_cost(audit_cost))}</div>'
+                       f'<div class="sub">{audit_cost["invocation_count"]:,} Bedrock calls</div></div>') if audit_cost else ""
 
     total_cost = sum(a["metrics"]["total_cost_usd"] for a in assessments)
     total_invocations = sum(a["metrics"]["invocation_count"] for a in assessments)
@@ -463,6 +468,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
                 <div class="label">Total Spend</div>
                 <div class="value">{_escape(format_cost(_totals(assessments)))}</div>
             </div>
+            {audit_cost_card}
             <div class="card">
                 <div class="label">Use Cases</div>
                 <div class="value">{len(assessments)}</div>
@@ -475,6 +481,9 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
                 <div class="label">Invocations</div>
                 <div class="value">{total_invocations:,}</div>
             </div>
+        </div>
+
+        <div class="summary-grid">
             <div class="card">
                 <div class="label">Stop</div>
                 <div class="value stop">{len(stop)}</div>

@@ -81,7 +81,7 @@ def format_cost(metrics):
     unpriced = metrics.get("unpriced_count", 0)
     if unpriced and unpriced >= metrics.get("invocation_count", 0):
         return "unknown"
-    cost = f"${metrics.get('total_cost_usd', 0.0):.2f}"
+    cost = f"${metrics.get('total_cost_usd', 0.0):,.2f}"
     return f"{cost} (partial, {unpriced:,} unpriced)" if unpriced else cost
 
 
@@ -95,7 +95,7 @@ def _failed_sessions(assessments):
     return sum(1 for a in assessments for s in a.get("sessions", []) if s.get("classification_error"))
 
 
-def generate_report(assessments, output_path, show_samples=False, source="bedrock"):
+def generate_report(assessments, output_path, show_samples=False, source="bedrock", audit_cost=None):
     """Generate a markdown report: Business view first, Technical view second."""
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]
@@ -128,6 +128,9 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
     if stop:
         stop_cost = sum(a["metrics"]["total_cost_usd"] for a in stop)
         lines.append(f"| Potential savings (STOP) | ${stop_cost:.2f} |")
+    if audit_cost:
+        lines.append(f"| Audit cost (this report) | {format_cost(audit_cost)} "
+                     f"({audit_cost['invocation_count']:,} Bedrock calls) |")
 
     if source == "otlp":
         lines.append(f"\n> **Data source: OpenTelemetry.** Cost figures are estimated from "

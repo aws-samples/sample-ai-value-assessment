@@ -10,7 +10,8 @@ from datetime import datetime, timedelta, timezone
 
 from aiva.reader import read_invocation_logs_to_store
 from aiva.otlp_reader import read_otlp_logs_to_store
-from aiva.classifier import classify_activities, cluster_use_cases, classify_use_cases, cap_use_cases, NOT_ASSESSED
+from aiva.classifier import (audit_usage, classify_activities, cluster_use_cases, classify_use_cases,
+                             cap_use_cases, NOT_ASSESSED)
 from aiva.reporter import generate_report, generate_json_report
 from aiva.html_reporter import generate_html_report
 from aiva.preflight import run_preflight
@@ -175,6 +176,8 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
 
     # Step 5: Generate report
     console.print("[5/5] Generating report...")
+    audit_cost = audit_usage(audit_nonce)
+    console.print(f"  This report: {audit_cost['invocation_count']:,} Bedrock calls, ${audit_cost['total_cost_usd']:.2f}")
 
     run_meta = {
         "bucket": bucket, "prefix": prefix, "region": region,
@@ -182,17 +185,21 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
         "source": source,
         "classification_errors": {"sessions_not_classified": failed_sessions,
                                   "use_cases_not_assessed": not_assessed},
+        "audit_cost": {"bedrock_calls": audit_cost["invocation_count"],
+                       "cost_usd": round(audit_cost["total_cost_usd"], 6),
+                       "unpriced_calls": audit_cost["unpriced_count"]},
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     if fmt in ("html", "both", "all"):
         html_path = f"{output}.html"
-        generate_html_report(assessments, html_path, show_samples=show_samples, source=source)
+        generate_html_report(assessments, html_path, show_samples=show_samples, source=source,
+                             audit_cost=audit_cost)
         console.print(f"  [green]HTML report: {html_path}[/green]")
 
     if fmt in ("md", "both", "all"):
         md_path = f"{output}.md"
-        generate_report(assessments, md_path, show_samples=show_samples, source=source)
+        generate_report(assessments, md_path, show_samples=show_samples, source=source, audit_cost=audit_cost)
         console.print(f"  [green]Markdown report: {md_path}[/green]")
 
     if fmt in ("json", "all"):

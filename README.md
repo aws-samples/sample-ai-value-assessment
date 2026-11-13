@@ -175,12 +175,14 @@ S3 logs -> read + normalise -> group into sessions -> Pass 1 -> Pass 2a -> Pass 
 
 ## Costs
 
-The audit calls Bedrock a handful of times (roughly one classification call per
-session plus a couple of rollup calls) using a small model. The expensive
-Bedrock usage is your existing logs; the tool only reads and summarises them.
+The audit calls Bedrock roughly once per session plus a few rollup calls, using
+the classification model (Sonnet 4.6 by default). The expensive Bedrock usage is
+your existing logs; the tool only reads and summarises them. Each report shows
+what it cost to produce in the Audit Cost tile (Bedrock tokens for that run;
+CodeBuild and S3 requests are extra and typically cents).
 
-The table below is illustrative, not a quote. Model Invocation Logging writes
-one object per Bedrock call, and cost scales with the number of distinct
+The table below is illustrative, not a quote. Model Invocation Logging batches
+several calls into each log object, and cost scales with the number of distinct
 sessions, not raw invocation count. Rates are the default classification model,
 Sonnet 4.6, at $3.00 per million input tokens and $15.00 per million output.
 
