@@ -295,6 +295,7 @@ Resources:
                   # tightly bound (no account wildcard, no other service).
                   - "arn:aws:bedrock:*::foundation-model/*"
                   - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:application-inference-profile/*"
         - PolicyName: WriteCodeBuildLogs
           PolicyDocument:
             Version: "2012-10-17"
