@@ -706,3 +706,13 @@ def test_failed_bedrock_calls_never_become_stop():
     cluster = {"metrics": {"session_count": 2, "total_cost_usd": 5.0, "invocation_count": 10},
                "sessions": [{"activity": activity}, {"activity": activity}]}
     assert _apply_verdict_rubric("REFINE", cluster, {}, {})[0] != "STOP"
+
+
+def test_converse_response_text_is_extracted():
+    from aiva.reader import _extract_response_text
+    body = {"output": {"message": {"role": "assistant", "content": [
+        {"reasoningContent": {"reasoningText": {"text": "thinking"}}},
+        {"text": "first"}, {"text": "second"}]}}, "stopReason": "end_turn"}
+    assert _extract_response_text(body) == "first second"
+    assert _extract_response_text({"output": "not a message"}) == ""
+    assert _extract_response_text({"content": [{"type": "text", "text": "anthropic"}]}) == "anthropic"

@@ -174,12 +174,17 @@ def _extract_messages(input_body):
 def _extract_response_text(output_body):
     """Extract response text from output body (handles streaming event arrays)."""
     if isinstance(output_body, dict):
-        # Non-streaming response
-        content = output_body.get("content", [])
+        # Non-streaming response. Converse nests content under output.message
+        # and its blocks carry no "type"; reasoningContent blocks are skipped.
+        content = output_body.get("content")
+        if content is None:
+            output = output_body.get("output")
+            message = output.get("message") if isinstance(output, dict) else None
+            content = message.get("content", []) if isinstance(message, dict) else []
         if isinstance(content, list):
             parts = []
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
+                if isinstance(block, dict) and block.get("type", "text" if "text" in block else None) == "text":
                     parts.append(block.get("text", ""))
             return " ".join(parts)
         return ""
