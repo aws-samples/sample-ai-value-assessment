@@ -170,10 +170,13 @@ def _describe_activity(bedrock, session, invocations, model_id):
     )
 
     parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit")
+    # A failed call is not evidence the task was unidentifiable, so it must not feed STOP rule 1.
+    fallback = "Task not identifiable from logs" if parsed is not None else "Not classified (Bedrock call failed)"
+    parsed = parsed or {}
 
     return {
         "session_id": session["session_id"],
-        "activity": parsed.get("activity", "Task not identifiable from logs"),
+        "activity": parsed.get("activity", fallback),
         "description": parsed.get("description", ""),
         "business_value": parsed.get("business_value", ""),
         "confidence": parsed.get("confidence", "low"),
@@ -219,7 +222,7 @@ def _cluster_activities(bedrock, activities, model_id):
 
     prompt = _pass2a.build_prompt(nonce=nonce, listing=listing)
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit")
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
     use_cases = parsed.get("use_cases", [])
 
     by_id = {a["session_id"]: a for a in activities}
@@ -371,7 +374,7 @@ def _merge_one_batch(bedrock, chunk_clusters, model_id):
 
     prompt = _pass2a_merge.build_prompt(nonce=nonce, listing=listing)
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit")
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, max_tokens=3000, tag="aiva-audit") or {}
     merged = parsed.get("merged", [])
 
     by_id = {f"cluster_{i}": c for i, c in enumerate(chunk_clusters)}
@@ -420,7 +423,7 @@ def _classify_use_case(bedrock, cluster, model_id, window_days=7):
         projected_monthly=projected_monthly, window_days=window_days,
     )
 
-    parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit")
+    parsed = _call_bedrock_json(bedrock, model_id, prompt, tag="aiva-audit") or {}
 
     # Objective checks computed in Python from log facts (not LLM prose).
     cost_optimizations = dict(parsed.get("cost_optimizations", {}))
@@ -721,7 +724,7 @@ def _extract_real_user_text(content):
 
 
 def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, tag=None):
-    """Invoke Bedrock and parse a JSON response. Returns {} on failure."""
+    """Invoke Bedrock and parse a JSON response. Returns None if the call fails, {} if the reply has no JSON."""
     try:
         kwargs = {
             "modelId": model_id,
@@ -732,9 +735,9 @@ def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, tag=None):
             kwargs["requestMetadata"] = {"source": tag}
         response = bedrock.converse(**kwargs)
         text = response["output"]["message"]["content"][0]["text"]
-        return _parse_json_response(text)
     except Exception:
-        return {}
+        return None
+    return _parse_json_response(text)
 
 
 def _parse_json_response(text):
