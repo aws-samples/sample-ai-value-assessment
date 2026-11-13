@@ -34,7 +34,7 @@ def main():
 @click.option("--days", default=7, type=int, help="Number of days of logs to analyse")
 @click.option("--output", default="report", help="Output file path (without extension)")
 @click.option("--format", "fmt", default="all", type=click.Choice(["html", "md", "json", "both", "all"]), help="Output format (all = html+md+json)")
-@click.option("--model", default="us.anthropic.claude-sonnet-4-6", help="Bedrock model ID (inference profile) for classification")
+@click.option("--model", default="global.anthropic.claude-sonnet-4-6", show_default=True, help="Bedrock model ID or inference profile ID/ARN for classification")
 @click.option("--source", default="bedrock", type=click.Choice(["bedrock", "otlp"]), help="Log source format: bedrock (Model Invocation Logs) or otlp (OpenTelemetry JSON)")
 @click.option("--skip-preflight", is_flag=True, default=False, help="Skip credential/bucket/model access checks (not recommended)")
 @click.option("--db", default=None, help="Path to the local SQLite store (default: a temp file, deleted after the run)")

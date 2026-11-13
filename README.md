@@ -47,7 +47,10 @@ In the CloudFormation console, create a stack and upload
    IAM, and logging config are all regional, and a cross-region deploy fails
    pre-flight checks.
 2. Set **SourceBucketName** to your log bucket. Optionally set
-   **DestinationBucketName**, or leave it blank to have one generated.
+   **DestinationBucketName**, or leave it blank to have one generated. If the
+   log bucket uses SSE-KMS with a customer managed key, set
+   **SourceBucketKmsKeyArn**. **ClassifierModelId** takes any Bedrock model ID
+   or inference profile ID/ARN (default `global.anthropic.claude-sonnet-4-6`).
 3. Optionally set **ReportReaderPrincipalArn** to the single IAM identity that
    may read the report. The report contains real prompt and response excerpts.
    Left blank, any principal in the account can read it. Public access is always

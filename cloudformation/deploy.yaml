@@ -49,8 +49,16 @@ Parameters:
       Code or Cowork via an OTEL Collector with the awss3 exporter).
   ClassifierModelId:
     Type: String
-    Default: us.anthropic.claude-sonnet-4-6
-    Description: Bedrock model ID (inference profile) used to classify usage.
+    Default: global.anthropic.claude-sonnet-4-6
+    Description: Bedrock model ID or inference profile ID/ARN used to classify usage.
+  SourceBucketKmsKeyArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[a-zA-Z0-9-]+$"
+    Description: >-
+      Optional. ARN of the customer managed KMS key that encrypts the log
+      objects. When set, the audit role gets kms:Decrypt on this key only,
+      and only through S3.
   DestinationBucketName:
     Type: String
     Default: ""
@@ -81,6 +89,7 @@ Parameters:
 Conditions:
   HasDestinationBucketName: !Not [!Equals [!Ref DestinationBucketName, ""]]
   HasReportReaderPrincipalArn: !Not [!Equals [!Ref ReportReaderPrincipalArn, ""]]
+  HasSourceBucketKmsKeyArn: !Not [!Equals [!Ref SourceBucketKmsKeyArn, ""]]
 
 Resources:
   AccessLogsBucket:
@@ -271,6 +280,20 @@ Resources:
                   # tightly bound (no account wildcard, no other service).
                   - "arn:aws:bedrock:*::foundation-model/*"
                   - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*"
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:application-inference-profile/*"
+        - !If
+          - HasSourceBucketKmsKeyArn
+          - PolicyName: DecryptSourceLogs
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: kms:Decrypt
+                  Resource: !Ref SourceBucketKmsKeyArn
+                  Condition:
+                    StringEquals:
+                      kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"
+          - !Ref AWS::NoValue
         - PolicyName: WriteCodeBuildLogs
           PolicyDocument:
             Version: "2012-10-17"
