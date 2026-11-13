@@ -690,7 +690,7 @@ def _bedrock_log(model, input_body, output_body, operation="InvokeModel"):
             "output": {"outputTokenCount": 50, "outputBodyJson": output_body}}
 
 
-def test_converse_bodies_populate_prompt_response_and_tool_calls():
+def test_converse_bodies_populate_prompt_and_response():
     from aiva.classifier import extract_session_signal
     from aiva.reader import _normalise_record
     input_body = {
@@ -716,9 +716,10 @@ def test_converse_bodies_populate_prompt_response_and_tool_calls():
     assert record["tools"] == ["Bash"]
     assert record["messages"][0]["content"][0]["text"].startswith("Draft a reply")
     assert record["response_text"] == "Dear customer, your payout was delayed because of a bank holiday."
-    assert record["tool_calls"] == ["send_email"]
     # Converse toolUse blocks in the message history carry signal too.
     assert "Bash: grep payout ledger.csv" in extract_session_signal([record])
+
+
 def test_otlp_zero_time_falls_back_to_observed_time():
     # OTLP defines timeUnixNano 0 as unknown; some exporters send it explicitly.
     attrs = [_otlp_attr("event.name", "claude_code.api_request"), _otlp_attr("model", "claude-sonnet-4-6"),

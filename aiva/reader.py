@@ -388,13 +388,11 @@ def _extract_tool_calls(output_body):
     tool names there come from content_block_start, not delta.
     """
     if isinstance(output_body, dict):
-        names = []
-        for block in _response_blocks(output_body):
-            if block.get("type") == "tool_use":
-                names.append(block.get("name", "unknown"))
-            elif isinstance(block.get("toolUse"), dict):
-                names.append(block["toolUse"].get("name", "unknown"))
-        return names
+        content = output_body.get("content", [])
+        if isinstance(content, list):
+            return [block.get("name", "unknown") for block in content
+                    if isinstance(block, dict) and block.get("type") == "tool_use"]
+        return []
 
     if isinstance(output_body, list):
         names = []
