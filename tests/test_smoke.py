@@ -6,7 +6,6 @@ independently testable.
 Run: source .venv/bin/activate && pytest tests/ -v
 """
 import json
-import os
 
 from aiva.pricing import get_pricing, PRICING_PER_1K, UNKNOWN_PRICING
 from aiva.cli import _group_into_sessions

@@ -66,7 +66,7 @@ def run(config_path, skip_preflight, db):
 
 
 def _execute(config, skip_preflight, db):
-    console.print(f"\n[bold]AI Value Assessment Audit[/bold]")
+    console.print("\n[bold]AI Value Assessment Audit[/bold]")
     for src in config.sources:
         console.print(f"  Source: {SOURCES[src.type].label}, s3://{src.bucket}/{src.prefix} ({src.region})")
     console.print(f"  Region: {config.region}")

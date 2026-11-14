@@ -26,8 +26,6 @@ _FATAL_CODES = {"AccessDenied", "AccessDeniedException", "KMS.AccessDeniedExcept
 @dataclass
 class IngestResult:
     newest: str | None = None  # max LastModified read (ISO-8601 UTC), the next run's watermark
-    objects: int = 0
-    invocations: int = 0
     skipped: list = field(default_factory=list)  # (key, reason) for objects or records not read
 
 
@@ -68,7 +66,7 @@ def read_to_store(store, source, bucket, prefix, region, days, since=None):
         cutoff = _coerce_dt(resumed) if resumed else datetime.now(timezone.utc) - timedelta(days=days)
 
     wanted = _list_wanted(s3, source, bucket, prefix, cutoff)
-    result = IngestResult(objects=len(wanted))
+    result = IngestResult()
     if not wanted:
         return result
 
@@ -100,7 +98,6 @@ def read_to_store(store, source, bucket, prefix, region, days, since=None):
             # bare key so rows from older stores still dedupe.
             for i, invocation in enumerate(invocations):
                 buffer.append((invocation, key if i == 0 else f"{key}#{i}", lm_iso))
-            result.invocations += len(invocations)
             if newest is None or lm > newest:
                 newest = lm
             if len(buffer) >= INSERT_BATCH_SIZE:

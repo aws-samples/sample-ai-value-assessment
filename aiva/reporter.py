@@ -100,7 +100,7 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
         lines.append(f"| Potential savings (STOP) | ${stop_cost:.2f} |")
 
     if source == "otlp":
-        lines.append(f"\n> **Data source: OpenTelemetry.** Cost figures are estimated from "
+        lines.append("\n> **Data source: OpenTelemetry.** Cost figures are estimated from "
                       "token counts and published model pricing. They do not reflect "
                       "negotiated rates, provisioned throughput, or batch discounts.")
 

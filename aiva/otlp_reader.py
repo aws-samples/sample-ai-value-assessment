@@ -337,11 +337,6 @@ def _nano_to_iso(nano):
     except (ValueError, OSError):
         return ""
 
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return 0
-
 
 def _extract_list_attr(attrs, key):
     """Extract a list-valued attribute, or return empty list."""
