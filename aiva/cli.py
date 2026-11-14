@@ -2,12 +2,14 @@ import os
 import sys
 import tempfile
 
+import boto3
 import click
 from rich.console import Console
 
 from datetime import datetime, timezone
 
 from aiva.ingest import read_to_store
+from aiva.config import DEFAULT_MODEL, FORMATS, RunConfig, SourceConfig, load_config
 from aiva.classifier import classify_activities, cluster_use_cases, classify_use_cases, cap_use_cases
 from aiva.reporter import generate_report, generate_json_report
 from aiva.html_reporter import generate_html_report
@@ -33,25 +35,47 @@ def main():
 @click.option("--region", default="us-west-2", help="AWS region")
 @click.option("--days", default=7, type=int, help="Number of days of logs to analyse")
 @click.option("--output", default="report", help="Output file path (without extension)")
-@click.option("--format", "fmt", default="all", type=click.Choice(["html", "md", "json", "both", "all"]), help="Output format (all = html+md+json)")
-@click.option("--model", default="global.anthropic.claude-sonnet-4-6", show_default=True, help="Bedrock model ID or inference profile ID/ARN for classification")
+@click.option("--format", "fmt", default="all", type=click.Choice(FORMATS), help="Output format (all = html+md+json)")
+@click.option("--model", default=DEFAULT_MODEL, show_default=True, help="Bedrock model ID or inference profile ID/ARN for classification")
 @click.option("--source", default="bedrock", type=click.Choice(list(SOURCES)), help="Log source format: bedrock (Model Invocation Logs) or otlp (OpenTelemetry JSON)")
 @click.option("--skip-preflight", is_flag=True, default=False, help="Skip credential/bucket/model access checks (not recommended)")
 @click.option("--db", default=None, help="Path to the local SQLite store (default: a temp file, deleted after the run)")
 @click.option("--max-use-cases", default=50, type=int, help="Cap on named use cases (Pass 2b calls); overflow rolls into one 'Other' cluster. Set above your expected use-case count, cost per extra slot is a fraction of a cent")
 @click.option("--show-samples", is_flag=True, default=False, help="Include raw prompt/response samples in the report (off by default to protect employee privacy)")
 def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflight, db, max_use_cases, show_samples):
-    """Run a full audit on Model Invocation Logs."""
+    """Run a full audit on one log source."""
+    config = RunConfig(
+        region=region, days=days, model=model, output=output, format=fmt,
+        max_use_cases=max_use_cases, show_samples=show_samples,
+        sources=[SourceConfig(type=source, bucket=bucket, prefix=prefix, region=region)],
+    )
+    _execute(config, skip_preflight, db)
+
+
+@main.command()
+@click.option("--config", "config_path", required=True, type=click.Path(exists=True, dir_okay=False), help="TOML file listing the log sources (see aiva.example.toml)")
+@click.option("--skip-preflight", is_flag=True, default=False, help="Skip credential/bucket/model access checks (not recommended)")
+@click.option("--db", default=None, help="Path to the local SQLite store (default: a temp file, deleted after the run)")
+def run(config_path, skip_preflight, db):
+    """Run an audit over every source in a config file, into one report."""
+    try:
+        config = load_config(config_path)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    _execute(config, skip_preflight, db)
+
+
+def _execute(config, skip_preflight, db):
     console.print(f"\n[bold]AI Value Assessment Audit[/bold]")
-    console.print(f"  Source: {SOURCES[source].label}")
-    console.print(f"  Bucket: s3://{bucket}/{prefix}")
-    console.print(f"  Region: {region}")
-    console.print(f"  Window: last {days} days")
+    for src in config.sources:
+        console.print(f"  Source: {SOURCES[src.type].label}, s3://{src.bucket}/{src.prefix} ({src.region})")
+    console.print(f"  Region: {config.region}")
+    console.print(f"  Window: last {config.days} days")
     console.print()
 
     if not skip_preflight:
         console.print("[0/5] Checking credentials, bucket access, and model access...")
-        if not _run_preflight_and_report(bucket, prefix, region, model, source):
+        if not _run_preflight_and_report(config):
             sys.exit(1)
         console.print()
 
@@ -68,7 +92,11 @@ def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflig
         cleanup_db = True
 
     try:
-        _run_audit(bucket, prefix, region, days, output, fmt, model, source, db_path, max_use_cases, show_samples)
+        store = AuditStore(db_path)
+        try:
+            _run_audit_with_store(store, config)
+        finally:
+            store.close()
     finally:
         if cleanup_db:
             for suffix in ("", "-wal", "-shm"):
@@ -78,21 +106,16 @@ def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflig
                     pass
 
 
-def _run_audit(bucket, prefix, region, days, output, fmt, model, source, db_path, max_use_cases, show_samples):
-    store = AuditStore(db_path)
-    try:
-        _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, source, max_use_cases, show_samples)
-    finally:
-        store.close()
+def _run_audit_with_store(store, config):
+    region, model, days = config.region, config.model, config.days
 
-
-def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, model, source, max_use_cases, show_samples):
     # Step 1: Read logs from S3, streamed into the store in batches.
-    console.print(f"[1/5] Reading {SOURCES[source].reading} from S3...")
-    result = read_to_store(store, SOURCES[source], bucket, prefix, region, days)
-    if result.skipped:
-        console.print(f"  [yellow]Skipped {len(result.skipped)} unreadable objects or records, "
-                      f"first: {result.skipped[0][0]} ({result.skipped[0][1]})[/yellow]")
+    for src in config.sources:
+        console.print(f"[1/5] Reading {SOURCES[src.type].reading} from s3://{src.bucket}/{src.prefix}...")
+        result = read_to_store(store, SOURCES[src.type], src.bucket, src.prefix, src.region, days)
+        if result.skipped:
+            console.print(f"  [yellow]Skipped {len(result.skipped)} unreadable objects or records, "
+                          f"first: {result.skipped[0][0]} ({result.skipped[0][1]})[/yellow]")
     light_rows = store.fetch_light_rows()
     console.print(f"  Found {len(light_rows)} invocations")
 
@@ -122,10 +145,10 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
     clusters = cluster_use_cases(activities, region, model)
     console.print(f"  Merged {len(activities)} activities into {len(clusters)} use cases")
 
-    if len(clusters) > max_use_cases:
-        overflow = len(clusters) - max_use_cases
-        clusters = cap_use_cases(clusters, max_use_cases)
-        console.print(f"  [yellow]Capped at {max_use_cases}: {overflow} lower-cost use case(s) "
+    if len(clusters) > config.max_use_cases:
+        overflow = len(clusters) - config.max_use_cases
+        clusters = cap_use_cases(clusters, config.max_use_cases)
+        console.print(f"  [yellow]Capped at {config.max_use_cases}: {overflow} lower-cost use case(s) "
                       f"rolled into 'Other' (raise --max-use-cases to see them individually)[/yellow]")
 
     console.print("      Classifying use cases (STOP / REFINE / EXPAND)...")
@@ -133,28 +156,7 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
 
     # Step 5: Generate report
     console.print("[5/5] Generating report...")
-
-    run_meta = {
-        "bucket": bucket, "prefix": prefix, "region": region,
-        "window_days": days, "classifier_model": model,
-        "source": source,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    if fmt in ("html", "both", "all"):
-        html_path = f"{output}.html"
-        generate_html_report(assessments, html_path, show_samples=show_samples, source=source)
-        console.print(f"  [green]HTML report: {html_path}[/green]")
-
-    if fmt in ("md", "both", "all"):
-        md_path = f"{output}.md"
-        generate_report(assessments, md_path, show_samples=show_samples, source=source)
-        console.print(f"  [green]Markdown report: {md_path}[/green]")
-
-    if fmt in ("json", "all"):
-        json_path = f"{output}.json"
-        generate_json_report(assessments, json_path, meta=run_meta, show_samples=show_samples)
-        console.print(f"  [green]JSON report: {json_path}[/green]")
+    _write_reports(assessments, config)
 
     # Show audit overhead
     if audit_count:
@@ -163,7 +165,44 @@ def _run_audit_with_store(store, bucket, prefix, region, days, output, fmt, mode
     console.print()
 
 
-def _run_preflight_and_report(bucket, prefix, region, model, source="bedrock"):
+def _write_reports(assessments, config):
+    """Write the reports to config.output, a local path or s3://bucket/key (no extension)."""
+    run_meta = {
+        "sources": [vars(src) for src in config.sources], "region": config.region,
+        "window_days": config.days, "classifier_model": config.model,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # The OTLP caveat (estimated cost) applies when any source is OTLP.
+    source = "otlp" if any(src.type == "otlp" for src in config.sources) else "bedrock"
+    fmt, show_samples = config.format, config.show_samples
+
+    to_s3 = config.output.startswith("s3://")
+    out_dir = tempfile.mkdtemp(prefix="aiva-report-") if to_s3 else None
+    output = os.path.join(out_dir, "report") if to_s3 else config.output
+
+    written = []
+    if fmt in ("html", "both", "all"):
+        generate_html_report(assessments, f"{output}.html", show_samples=show_samples, source=source)
+        written.append(".html")
+    if fmt in ("md", "both", "all"):
+        generate_report(assessments, f"{output}.md", show_samples=show_samples, source=source)
+        written.append(".md")
+    if fmt in ("json", "all"):
+        generate_json_report(assessments, f"{output}.json", meta=run_meta, show_samples=show_samples)
+        written.append(".json")
+
+    if to_s3:
+        bucket, _, key = config.output[5:].partition("/")
+        s3 = boto3.client("s3", region_name=config.region)
+        for ext in written:
+            s3.upload_file(f"{output}{ext}", bucket, f"{key}{ext}")
+            os.remove(f"{output}{ext}")
+        os.rmdir(out_dir)
+    for ext in written:
+        console.print(f"  [green]Report: {config.output}{ext}[/green]")
+
+
+def _run_preflight_and_report(config):
     """Run pre-flight checks, print results, return True iff safe to proceed.
 
     Fails fast on credential/bucket/model problems instead of letting them
@@ -172,7 +211,7 @@ def _run_preflight_and_report(bucket, prefix, region, model, source="bedrock"):
     "Task not identifiable" with no indication that Bedrock access was the
     real problem (model access denied).
     """
-    checks = run_preflight(bucket, prefix, region, model, source=source)
+    checks = run_preflight(config.sources, config.region, config.model)
     ok = True
     for c in checks:
         style = _STATUS_STYLE.get(c["status"], "white")

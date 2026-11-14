@@ -94,6 +94,20 @@ prompt and response excerpts. Treat them as sensitive: do not commit or share
 them externally. Pass `--db path/to/audit.db` to keep the working store and
 resume an interrupted run.
 
+### Several sources in one report
+
+List the sources in a config file and run them together. This also works in
+CloudShell, and creates no AWS resources.
+
+```bash
+cp aiva.example.toml aiva.toml   # set region, buckets and output
+aiva run --config aiva.toml
+```
+
+`output` can be a local path or `s3://bucket/key`. Only add OpenTelemetry
+sources for usage that does not run through Bedrock, otherwise the same calls
+are counted twice.
+
 ## Using OTLP sources (Claude Code, Cowork, or any OTLP exporter)
 
 If your OTLP telemetry from Claude Code, Claude Cowork, or any other

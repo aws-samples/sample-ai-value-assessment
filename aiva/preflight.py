@@ -13,17 +13,19 @@ from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnect
 from aiva.sources import SOURCES
 
 
-def run_preflight(bucket, prefix, region, model_id, source="bedrock"):
+def run_preflight(sources, region, model_id):
     """Run all checks and return a list of {name, status, detail, hint}.
 
     status is "pass" or "fail". hint is only present on failure and names the
     concrete next step (attach a policy, enable model access, fix a flag).
     Does not raise; callers decide whether a failure should stop the run.
+    `sources` are config.SourceConfig entries; `region` is where the model is called.
     """
     checks = []
 
     identity = _check_credentials(checks)
-    _check_bucket_access(checks, bucket, prefix, region, identity, source=source)
+    for src in sources:
+        _check_bucket_access(checks, src.bucket, src.prefix, src.region, identity, source=src.type)
 
     if identity is None:
         checks.append({
