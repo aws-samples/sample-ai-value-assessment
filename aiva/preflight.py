@@ -121,8 +121,8 @@ def _check_bucket_access(checks, bucket, prefix, region, identity, source="bedro
                 "name": "S3 log bucket access",
                 "status": "fail",
                 "detail": f"Bucket '{bucket}' does not exist in this account/region.",
-                "hint": "Check --bucket for typos, or run scripts/enable-model-invocation-logging.sh "
-                        "if Model Invocation Logging has not been set up yet.",
+                "hint": "Check the bucket name for typos. If Model Invocation Logging is not set up yet, "
+                        "turn it on in the Bedrock console under Settings.",
             })
         else:
             checks.append({
