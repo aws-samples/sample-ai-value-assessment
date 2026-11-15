@@ -17,7 +17,7 @@ ID using the shared pricing module.
 
 from datetime import datetime, timezone
 
-from aiva.ingest import s3_key_prefix
+from aiva.ingest import Source, s3_key_prefix
 from aiva.invocation import Invocation, as_int
 from aiva.pricing import estimate_cost
 
@@ -346,3 +346,18 @@ def _extract_list_attr(attrs, key):
     if isinstance(val, str) and val:
         return [val]
     return []
+
+
+SOURCE = Source(
+    name="otlp",
+    label="OTLP Telemetry",
+    reading="OTLP telemetry logs",
+    present_check="OTLP logs present",
+    empty_hint=("This is expected on a brand-new setup. Confirm your OpenTelemetry "
+                "Collector is writing to this prefix; check --prefix if you expected "
+                "data immediately."),
+    log_prefix=log_prefix,
+    list_prefixes=list_prefixes,
+    wants_key=wants_key,
+    parse=parse,
+)

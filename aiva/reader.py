@@ -3,7 +3,7 @@ record becomes an Invocation. S3, threads and the store live in aiva.ingest."""
 
 from datetime import datetime, timedelta, timezone
 
-from aiva.ingest import s3_key_prefix
+from aiva.ingest import Source, s3_key_prefix
 from aiva.invocation import Invocation, as_int
 from aiva.pricing import estimate_cost
 
@@ -202,3 +202,18 @@ def _extract_response_text(output_body):
         return "".join(parts)
 
     return ""
+
+
+SOURCE = Source(
+    name="bedrock",
+    label="Bedrock Model Invocation Logs",
+    reading="invocation logs",
+    present_check="Model Invocation Logs present",
+    empty_hint=("This is expected on a brand-new setup. Logging takes a few minutes to "
+                "start appearing after the first Bedrock call; check --prefix if you "
+                "expected data immediately."),
+    log_prefix=log_prefix,
+    list_prefixes=list_prefixes,
+    wants_key=wants_key,
+    parse=parse,
+)

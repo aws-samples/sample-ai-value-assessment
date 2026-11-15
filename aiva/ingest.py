@@ -11,6 +11,7 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from typing import Callable
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -21,6 +22,20 @@ INSERT_BATCH_SIZE = 500  # bounds how many full payloads are ever resident at on
 # Errors that mean the run cannot work at all, not that one object is bad.
 _FATAL_CODES = {"AccessDenied", "AccessDeniedException", "KMS.AccessDeniedException",
                 "ExpiredToken", "InvalidAccessKeyId", "SignatureDoesNotMatch"}
+
+
+@dataclass(frozen=True)
+class Source:
+    """What a log source provides. Each adapter module defines one as SOURCE."""
+    name: str
+    label: str          # shown in the run header
+    reading: str        # "Reading <reading> from S3..."
+    present_check: str  # preflight check name
+    empty_hint: str     # preflight hint when no logs are found yet
+    log_prefix: Callable     # (prefix) -> key prefix the logs live under
+    list_prefixes: Callable  # (s3, bucket, log_prefix, cutoff) -> prefixes to list
+    wants_key: Callable      # (key relative to log_prefix) -> bool
+    parse: Callable          # (json document, fetch_body) -> Invocations
 
 
 @dataclass
