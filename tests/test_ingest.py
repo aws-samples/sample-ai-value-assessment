@@ -2,6 +2,7 @@
 
 import gzip
 import json
+from datetime import datetime, timezone
 import pathlib
 import sys
 from unittest import mock
@@ -12,12 +13,17 @@ from botocore.exceptions import ClientError
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from fake_s3 import FakeS3  # noqa: E402
 
+from aiva.config import SourceConfig  # noqa: E402
 from aiva.ingest import read_to_store  # noqa: E402
 from aiva.invocation import Invocation  # noqa: E402
-from aiva.sources import SOURCES  # noqa: E402
 from aiva.store import AuditStore  # noqa: E402
 
+FROM = datetime(2026, 1, 1, tzinfo=timezone.utc)
 DAY = "AWSLogs/111122223333/BedrockModelInvocationLogs/{region}/2026/11/12/03/"
+
+
+def _src(source="bedrock", prefix=""):
+    return SourceConfig(type=source, bucket="bucket", prefix=prefix, region="ap-southeast-2")
 
 
 def _record(i, **overrides):
@@ -39,8 +45,7 @@ def _write(root, key, records=None, raw=None):
 
 def _read(tmp_path, root, source="bedrock", prefix="", s3=None):
     store = AuditStore(str(tmp_path / "a.db"))
-    result = read_to_store(store, SOURCES[source], "bucket", prefix, "ap-southeast-2", 7,
-                           from_date="2026-01-01T00:00:00Z", session=s3 or FakeS3(root))
+    result = read_to_store(store, _src(source, prefix), FROM, session=s3 or FakeS3(root))
     rows = store.fetch_light_rows()
     store.close()
     return result, rows
@@ -74,14 +79,12 @@ def test_data_segment_in_prefix_does_not_skip_logs(tmp_path):
 
 
 def test_objects_commit_oldest_first_across_regions(tmp_path):
-    # Keys sort by region first; commits must follow LastModified so the
-    # resume watermark cannot skip a region's earlier objects.
+    # Keys sort by region first; row ids still follow time.
     root = tmp_path / "s3"
     _write(root, DAY.format(region="ap-southeast-2") + "20261112T035000Z_a.json.gz", [_record("late")])
     _write(root, DAY.format(region="us-east-1") + "20261112T031000Z_b.json.gz", [_record("early")])
-    result, rows = _read(tmp_path, root)
+    _, rows = _read(tmp_path, root)
     assert [r["request_id"] for r in rows] == ["early", "late"]
-    assert result.newest == "2026-11-12T03:50:00+00:00"
 
 
 def _otlp_export(model):
@@ -116,8 +119,7 @@ def test_two_sources_read_into_one_store(tmp_path):
     (otel_root / "otel" / "20261112T030000Z.json").write_text(json.dumps(_otlp_export("claude-sonnet-4-6")))
     store = AuditStore(str(tmp_path / "a.db"))
     for source, prefix, root in (("bedrock", "", bedrock_root), ("otlp", "otel", otel_root)):
-        read_to_store(store, SOURCES[source], "bucket", prefix, "ap-southeast-2", 7,
-                      from_date="2026-01-01T00:00:00Z", session=FakeS3(root))
+        read_to_store(store, _src(source, prefix), FROM, session=FakeS3(root))
     rows = store.fetch_light_rows()
     store.close()
     assert sorted((r["operation"], r["model"]) for r in rows) == [
@@ -126,12 +128,36 @@ def test_two_sources_read_into_one_store(tmp_path):
 
 
 def test_to_date_drops_objects_written_after_it(tmp_path):
-    from datetime import datetime, timezone
     root = tmp_path / "s3"
     _write(root, DAY.format(region="ap-southeast-2") + "20261112T030000Z_a.json.gz", [_record("in")])
     _write(root, DAY.format(region="ap-southeast-2") + "20261112T050000Z_b.json.gz", [_record("out")])
     store = AuditStore(str(tmp_path / "a.db"))
-    read_to_store(store, SOURCES["bedrock"], "bucket", "", "ap-southeast-2", 7, from_date="2026-01-01T00:00:00Z",
-                  to_date=datetime(2026, 11, 12, 4, tzinfo=timezone.utc), session=FakeS3(root))
+    read_to_store(store, _src(), FROM, to_date=datetime(2026, 11, 12, 4, tzinfo=timezone.utc), session=FakeS3(root))
     assert [r["request_id"] for r in store.fetch_light_rows()] == ["in"]
     store.close()
+
+
+def test_rerun_into_same_store_fetches_only_missing_objects(tmp_path):
+    # A run killed partway through a central bucket (two regions) resumes
+    # without re-downloading what it already stored, and without gaps.
+    root = tmp_path / "s3"
+    keys = [DAY.format(region="ap-southeast-2") + "20261112T030000Z_a.json.gz",
+            DAY.format(region="us-east-1") + "20261112T020000Z_b.json.gz",
+            DAY.format(region="us-east-1") + "20261112T040000Z_c.json.gz"]
+    for n, key in enumerate(keys):
+        _write(root, key, [_record(f"{n}-0"), _record(f"{n}-1")])
+    s3 = FakeS3(root)
+    fetched = []
+    get_object = s3.get_object
+    s3.get_object = lambda Bucket, Key: fetched.append(Key) or get_object(Bucket, Key)
+
+    store = AuditStore(str(tmp_path / "a.db"))
+    last = s3.objects.pop(keys[2])  # first run: the last object has not arrived yet
+    read_to_store(store, _src(), FROM, session=s3)
+    s3.objects[keys[2]] = last
+    fetched.clear()
+    read_to_store(store, _src(), FROM, session=s3)
+    rows = store.fetch_light_rows()
+    store.close()
+    assert fetched == [keys[2]]
+    assert sorted(r["request_id"] for r in rows) == ["0-0", "0-1", "1-0", "1-1", "2-0", "2-1"]

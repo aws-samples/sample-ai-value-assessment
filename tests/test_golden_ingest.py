@@ -22,16 +22,17 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
 
 def _read(store, s3):
+    from datetime import datetime, timezone
+    from aiva.config import SourceConfig
     from aiva.ingest import read_to_store
-    from aiva.sources import SOURCES
-    return read_to_store(store, SOURCES["bedrock"], "bucket", "", "ap-southeast-2", 7,
-                         from_date="2026-01-01T00:00:00Z", session=s3).newest
+    src = SourceConfig(type="bedrock", bucket="bucket", prefix="", region="ap-southeast-2")
+    read_to_store(store, src, datetime(2026, 1, 1, tzinfo=timezone.utc), session=s3)
 
 
 def snapshot(root, db_path):
     store = AuditStore(str(db_path))
     try:
-        newest = _read(store, FakeS3(root))
+        _read(store, FakeS3(root))
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute("SELECT * FROM invocations ORDER BY s3_key")]
@@ -42,7 +43,7 @@ def snapshot(root, db_path):
               "cost": round(s["total_cost_usd"], 9), "first_ts": str(s["first_ts"]), "last_ts": str(s["last_ts"])}
              for s in _group_into_sessions(store.fetch_light_rows())),
             key=lambda s: s["keys"])
-        return {"newest": newest, "rows": rows, "sessions": sessions}
+        return {"rows": rows, "sessions": sessions}
     finally:
         store.close()
 

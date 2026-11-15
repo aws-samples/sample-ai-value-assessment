@@ -80,7 +80,8 @@ def test_role_arn_reads_with_assumed_credentials():
 
 def test_reports_upload_to_s3_output():
     from aiva.cli import _write_reports
-    config = RunConfig(region="ap-southeast-2", output="s3://reports/aiva/run1", format="all",
+    config = RunConfig(region="ap-southeast-2", from_date=datetime(2026, 10, 1, tzinfo=timezone.utc),
+                       output="s3://reports/aiva/run1", format="all",
                        sources=[SourceConfig("bedrock", "logs", "", "ap-southeast-2")])
     s3 = mock.Mock()
     with mock.patch("boto3.client", return_value=s3):

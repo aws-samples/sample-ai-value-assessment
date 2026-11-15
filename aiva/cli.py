@@ -45,7 +45,8 @@ def main():
 def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflight, db, max_use_cases, show_samples):
     """Run a full audit on one log source."""
     config = RunConfig(
-        region=region, days=days, model=model, output=output, format=fmt,
+        region=region, from_date=datetime.now(timezone.utc) - timedelta(days=days),
+        model=model, output=output, format=fmt,
         max_use_cases=max_use_cases, show_samples=show_samples,
         sources=[SourceConfig(type=source, bucket=bucket, prefix=prefix, region=region)],
     )
@@ -68,11 +69,10 @@ def run(config_path, skip_preflight, db):
 def _execute(config, skip_preflight, db):
     console.print("\n[bold]AI Value Assessment Audit[/bold]")
     for src in config.sources:
-        console.print(f"  Source: {SOURCES[src.type].label}, s3://{src.bucket}/{src.prefix} ({src.region})")
+        console.print(f"  Source: {src.source.label}, s3://{src.bucket}/{src.prefix} ({src.region})")
     from_date, to_date, _ = config.window()
     # to_date is exclusive (midnight after the last day), so show the day before it.
-    window = (f"{from_date:%Y-%m-%d} to {to_date - timedelta(seconds=1):%Y-%m-%d}"
-              if from_date else f"last {config.days} days")
+    window = f"{from_date:%Y-%m-%d} to {to_date - timedelta(seconds=1):%Y-%m-%d}"
     console.print(f"  Region: {config.region}")
     console.print(f"  Window: {window}")
     console.print()
@@ -116,9 +116,8 @@ def _run_audit_with_store(store, config):
 
     # Step 1: Read logs from S3, streamed into the store in batches.
     for src in config.sources:
-        console.print(f"[1/5] Reading {SOURCES[src.type].reading} from s3://{src.bucket}/{src.prefix}...")
-        result = read_to_store(store, SOURCES[src.type], src.bucket, src.prefix, src.region, days,
-                               from_date=from_date, to_date=to_date, session=src.session())
+        console.print(f"[1/5] Reading {src.source.reading} from s3://{src.bucket}/{src.prefix}...")
+        result = read_to_store(store, src, from_date, to_date)
         if result.skipped:
             console.print(f"  [yellow]Skipped {len(result.skipped)} unreadable objects or records, "
                           f"first: {result.skipped[0][0]} ({result.skipped[0][1]})[/yellow]")

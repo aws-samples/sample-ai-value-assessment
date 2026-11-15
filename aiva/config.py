@@ -27,6 +27,11 @@ class SourceConfig:
     profile: str | None = None   # AWS config profile to read this source with
     role_arn: str | None = None  # role to assume, e.g. in a central log archive account
 
+    @property
+    def source(self):
+        """The adapter for this type (an ingest.Source)."""
+        return SOURCES[self.type]
+
     def session(self):
         """boto3 session for reading this source."""
         session = boto3.Session(profile_name=self.profile)
@@ -49,10 +54,9 @@ class SourceConfig:
 @dataclass
 class RunConfig:
     region: str  # where aiva calls Bedrock to classify
-    sources: list = field(default_factory=list)
-    from_date: datetime | None = None
+    from_date: datetime
     to_date: datetime | None = None  # defaults to now
-    days: int = 7  # only when from_date is not set (aiva audit --days)
+    sources: list = field(default_factory=list)
     model: str = DEFAULT_MODEL
     output: str = "report"  # path without extension, local or s3://bucket/key
     format: str = "all"
@@ -61,8 +65,6 @@ class RunConfig:
 
     def window(self):
         """(from_date, to_date, days): the read window and its length for monthly projections."""
-        if self.from_date is None:
-            return None, None, self.days
         to_date = self.to_date or datetime.now(timezone.utc)
         return self.from_date, to_date, max(1, round((to_date - self.from_date) / timedelta(days=1)))
 

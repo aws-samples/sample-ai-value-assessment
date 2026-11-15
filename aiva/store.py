@@ -21,16 +21,13 @@ a real 30GB / ~1M-invocation window took an estimated 5-8 hours end to end,
 long enough that a killed process (network blip, laptop sleep, an operator
 who needs to stop and restart later) previously meant starting the S3 fetch
 over from zero. Each row is keyed on its S3 object key (UNIQUE, INSERT OR
-IGNORE), so `resume_watermark()` can hand the reader a "resume from here"
-timestamp and re-listing near that boundary is a safe no-op for objects
-already committed, not a duplicate or a data-loss risk. See ingest.py's
-`read_to_store` for how `from_date` and this watermark compose.
+IGNORE), and `stored_keys()` tells the reader which objects are already
+committed, so a re-run into the same --db fetches only what is missing.
 """
 
 import json
 import sqlite3
 import threading
-from datetime import datetime, timedelta
 
 # requestMetadata keys that carry an explicit session/conversation identifier.
 # Checked in order; first present wins. Moved here (from cli.py) because
@@ -50,17 +47,6 @@ _LIGHT_COLUMNS = (
 # Kept as a hardcoded literal in that query, not built by joining this tuple
 # at query time, so the query passed to execute() is fixed source text.
 
-# How far back to re-list on resume, past the highest last_modified already
-# committed. A resume watermark taken from an in-memory "furthest seen"
-# variable would be wrong if the process died between updating that variable
-# and actually committing the batch it belongs to, that gap would silently
-# skip objects forever. Instead the watermark is read back from what is
-# ACTUALLY committed (MAX(last_modified) in the table), and padded backward
-# so any object near that boundary gets re-listed. Re-listing is safe and
-# cheap (a fetch, not a fetch you keep), because s3_key is UNIQUE and inserts
-# use OR IGNORE, so a re-fetched object that is already in the store is a
-# no-op, not a duplicate row.
-RESUME_PAD_MINUTES = 10
 
 
 class AuditStore:
@@ -112,10 +98,8 @@ class AuditStore:
         but the caller collects their results and inserts on the main thread,
         avoiding concurrent SQLite writers entirely.
 
-        INSERT OR IGNORE on s3_key (UNIQUE): re-inserting an object already
-        present (e.g. re-listed during a resume, see resume_watermark) is a
-        silent no-op, not a duplicate row and not an error. This is what
-        makes the resume watermark safe to pad backward rather than exact.
+        INSERT OR IGNORE on s3_key (UNIQUE): re-inserting a row already
+        present is a silent no-op, not a duplicate row and not an error.
         """
         conn = self._connect()
         rows = [_to_row(record, s3_key, last_modified) for record, s3_key, last_modified in items]
@@ -129,25 +113,12 @@ class AuditStore:
         )
         conn.commit()
 
-    def resume_watermark(self):
-        """Return the ISO-8601 UTC timestamp to resume listing from, padded
-        RESUME_PAD_MINUTES behind the highest committed last_modified, or
-        None if the store is empty (nothing to resume, do a normal --days read).
-
-        Padding, not the exact max, because objects near the boundary at the
-        moment a previous run died may have been listed but not yet
-        committed. Re-listing a short window behind the true max is cheap
-        (list + fetch a few extra objects) and safe (INSERT OR IGNORE), an
-        exact watermark risks silently never re-listing an object that was
-        in flight when the process was killed.
-        """
+    def stored_keys(self):
+        """S3 keys of objects already committed. Each object's first record
+        keeps the bare key (later ones get "#i"), and an object's records are
+        always committed together, so a bare key means the whole object is in."""
         conn = self._connect()
-        row = conn.execute("SELECT MAX(last_modified) FROM invocations").fetchone()
-        max_lm = row[0]
-        if not max_lm:
-            return None
-        dt = datetime.fromisoformat(max_lm)
-        return (dt - timedelta(minutes=RESUME_PAD_MINUTES)).isoformat()
+        return {row[0] for row in conn.execute("SELECT s3_key FROM invocations WHERE s3_key NOT LIKE '%#%'")}
 
     def fetch_light_rows(self):
         """Return all non-audit-overhead rows with only the light (session
