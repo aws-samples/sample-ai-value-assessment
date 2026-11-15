@@ -11,9 +11,9 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import timezone
+from typing import Callable
 
-import boto3
 from botocore.exceptions import ClientError
 
 INSERT_BATCH_SIZE = 500  # bounds how many full payloads are ever resident at once
@@ -23,11 +23,22 @@ _FATAL_CODES = {"AccessDenied", "AccessDeniedException", "KMS.AccessDeniedExcept
                 "ExpiredToken", "InvalidAccessKeyId", "SignatureDoesNotMatch"}
 
 
+@dataclass(frozen=True)
+class Source:
+    """What a log source provides. Each adapter module defines one as SOURCE."""
+    name: str
+    label: str          # shown in the run header
+    reading: str        # "Reading <reading> from S3..."
+    present_check: str  # preflight check name
+    empty_hint: str     # preflight hint when no logs are found yet
+    log_prefix: Callable     # (prefix) -> key prefix the logs live under
+    list_prefixes: Callable  # (s3, bucket, log_prefix, from_date) -> prefixes to list
+    wants_key: Callable      # (key relative to log_prefix) -> bool
+    parse: Callable          # (json document, fetch_body) -> Invocations
+
+
 @dataclass
 class IngestResult:
-    newest: str | None = None  # max LastModified read (ISO-8601 UTC), the next run's watermark
-    objects: int = 0
-    invocations: int = 0
     skipped: list = field(default_factory=list)  # (key, reason) for objects or records not read
 
 
@@ -41,34 +52,29 @@ def s3_key_prefix(prefix, *parts):
     return f"{joined}/" if joined else ""
 
 
-def read_to_store(store, source, bucket, prefix, region, days, since=None):
-    """Read `source` logs from S3 and write Invocations into `store`.
+def read_to_store(store, src, from_date, to_date=None, session=None):
+    """Read one configured source (config.SourceConfig) into `store`, for
+    objects written from `from_date` up to `to_date` (UTC datetimes).
 
     Records are written in batches as they arrive, never held as one list, so
     peak memory stays bounded by the batch size and worker count, not by total
     invocation count (see store.py's module docstring).
 
-    Cutoff precedence, most specific wins: an explicit `since` (ISO-8601 str
-    or datetime) > `store.resume_watermark()` (a prior run into this same --db
-    already has data, so this call is a resume) > `days`. Objects are fetched
-    and committed in LastModified order, so the watermark read back from the
-    store is a true high-water mark even when a central bucket holds several
-    accounts and regions. INSERT OR IGNORE on s3_key makes the re-listed
-    overlap a no-op.
+    Objects already in the store are not fetched again, so re-running into
+    the same --db resumes an interrupted read.
 
     One unreadable object or record is skipped and reported in the result;
-    an access or credentials error stops the run.
+    an access or credentials error stops the run. `session` overrides the
+    source's own credentials (tests pass a fake S3).
     """
-    s3 = boto3.client("s3", region_name=region)
+    session = session or src.session()
+    source = src.source
+    s3 = session.client("s3", region_name=src.region)
 
-    if since is not None:
-        cutoff = _coerce_dt(since)
-    else:
-        resumed = store.resume_watermark()
-        cutoff = _coerce_dt(resumed) if resumed else datetime.now(timezone.utc) - timedelta(days=days)
-
-    wanted = _list_wanted(s3, source, bucket, prefix, cutoff)
-    result = IngestResult(objects=len(wanted))
+    stored = store.stored_keys()
+    wanted = [(key, lm) for key, lm in _list_wanted(s3, source, src.bucket, src.prefix, from_date, to_date)
+              if key not in stored]
+    result = IngestResult()
     if not wanted:
         return result
 
@@ -77,53 +83,49 @@ def read_to_store(store, source, bucket, prefix, region, days, since=None):
     # main thread and batched into `store` there, so SQLite never sees
     # concurrent writers.
     _local = threading.local()
+    _lock = threading.Lock()  # a boto3 session is not safe to create clients from concurrently
 
     def _client():
         if not hasattr(_local, "s3"):
-            _local.s3 = boto3.client("s3", region_name=region)
+            with _lock:
+                _local.s3 = session.client("s3", region_name=src.region)
         return _local.s3
 
     def _fetch(item):
         key, lm = item
-        return _read_object(_client(), source, bucket, key), key, lm
+        return _read_object(_client(), source, src.bucket, key), key, lm
 
-    newest = None
     buffer = []
     max_workers = min(32, max(4, len(wanted)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         for (invocations, skipped), key, lm in pool.map(_fetch, wanted):
             result.skipped += skipped
-            if not invocations:
-                continue
             lm_iso = lm.astimezone(timezone.utc).isoformat()
             # One object can hold several invocations. The first keeps the
-            # bare key so rows from older stores still dedupe.
+            # bare key, which is what stored_keys() checks on a resume.
             for i, invocation in enumerate(invocations):
                 buffer.append((invocation, key if i == 0 else f"{key}#{i}", lm_iso))
-            result.invocations += len(invocations)
-            if newest is None or lm > newest:
-                newest = lm
+            # Flush only between objects, so an object is never half committed.
             if len(buffer) >= INSERT_BATCH_SIZE:
                 store.insert_invocations(buffer)
                 buffer = []
 
     if buffer:
         store.insert_invocations(buffer)
-
-    result.newest = newest.astimezone(timezone.utc).isoformat() if newest else None
     return result
 
 
-def _list_wanted(s3, source, bucket, prefix, cutoff):
-    """(key, last_modified) for every in-window object the source wants, oldest first."""
+def _list_wanted(s3, source, bucket, prefix, from_date, to_date=None):
+    """(key, last_modified) for every in-window object the source wants, oldest
+    first so row ids follow time."""
     paginator = s3.get_paginator("list_objects_v2")
     base = source.log_prefix(prefix)
     wanted = []
-    for list_prefix in source.list_prefixes(s3, bucket, base, cutoff):
+    for list_prefix in source.list_prefixes(s3, bucket, base, from_date):
         for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
             for obj in page.get("Contents", []):
                 # <= so a watermark equal to an object's time doesn't re-read it.
-                if obj["LastModified"] <= cutoff:
+                if obj["LastModified"] <= from_date or (to_date and obj["LastModified"] > to_date):
                     continue
                 # Only the part after the prefix is matched, so a prefix such
                 # as "platform/data/" cannot filter out every key.
@@ -202,13 +204,3 @@ def _fetch_json(s3, s3_uri):
     except Exception:
         return {}
 
-
-def _coerce_dt(value):
-    """Accept an ISO-8601 string or datetime, return a tz-aware UTC datetime."""
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt

@@ -24,6 +24,10 @@ class FakeS3:
                       if match else datetime(2026, 1, 1, tzinfo=timezone.utc))
                 self.objects[key] = (path.read_bytes(), lm)
 
+    def client(self, *_args, **_kwargs):
+        """Stands in for a boto3 session too, so tests can pass it as `session`."""
+        return self
+
     def get_paginator(self, _name):
         return self
 
