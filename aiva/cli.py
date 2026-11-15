@@ -6,7 +6,7 @@ import boto3
 import click
 from rich.console import Console
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiva.ingest import read_to_store
 from aiva.config import DEFAULT_MODEL, FORMATS, RunConfig, SourceConfig, load_config
@@ -69,8 +69,12 @@ def _execute(config, skip_preflight, db):
     console.print("\n[bold]AI Value Assessment Audit[/bold]")
     for src in config.sources:
         console.print(f"  Source: {SOURCES[src.type].label}, s3://{src.bucket}/{src.prefix} ({src.region})")
+    from_date, to_date, _ = config.window()
+    # to_date is exclusive (midnight after the last day), so show the day before it.
+    window = (f"{from_date:%Y-%m-%d} to {to_date - timedelta(seconds=1):%Y-%m-%d}"
+              if from_date else f"last {config.days} days")
     console.print(f"  Region: {config.region}")
-    console.print(f"  Window: last {config.days} days")
+    console.print(f"  Window: {window}")
     console.print()
 
     if not skip_preflight:
@@ -107,12 +111,14 @@ def _execute(config, skip_preflight, db):
 
 
 def _run_audit_with_store(store, config):
-    region, model, days = config.region, config.model, config.days
+    region, model = config.region, config.model
+    from_date, to_date, days = config.window()
 
     # Step 1: Read logs from S3, streamed into the store in batches.
     for src in config.sources:
         console.print(f"[1/5] Reading {SOURCES[src.type].reading} from s3://{src.bucket}/{src.prefix}...")
-        result = read_to_store(store, SOURCES[src.type], src.bucket, src.prefix, src.region, days)
+        result = read_to_store(store, SOURCES[src.type], src.bucket, src.prefix, src.region, days,
+                               from_date=from_date, to_date=to_date, session=src.session())
         if result.skipped:
             console.print(f"  [yellow]Skipped {len(result.skipped)} unreadable objects or records, "
                           f"first: {result.skipped[0][0]} ({result.skipped[0][1]})[/yellow]")
@@ -168,8 +174,10 @@ def _run_audit_with_store(store, config):
 def _write_reports(assessments, config):
     """Write the reports to config.output, a local path or s3://bucket/key (no extension)."""
     run_meta = {
-        "sources": [vars(src) for src in config.sources], "region": config.region,
-        "window_days": config.days, "classifier_model": config.model,
+        "sources": [{k: v for k, v in vars(src).items() if v} for src in config.sources], "region": config.region,
+        "window_days": config.window()[2], "classifier_model": config.model,
+        "from": config.from_date.isoformat() if config.from_date else None,
+        "to": config.to_date.isoformat() if config.to_date else None,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     # The OTLP caveat (estimated cost) applies when any source is OTLP.

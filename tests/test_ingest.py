@@ -39,9 +39,8 @@ def _write(root, key, records=None, raw=None):
 
 def _read(tmp_path, root, source="bedrock", prefix="", s3=None):
     store = AuditStore(str(tmp_path / "a.db"))
-    with mock.patch("boto3.client", return_value=s3 or FakeS3(root)):
-        result = read_to_store(store, SOURCES[source], "bucket", prefix, "ap-southeast-2", 7,
-                               since="2026-01-01T00:00:00Z")
+    result = read_to_store(store, SOURCES[source], "bucket", prefix, "ap-southeast-2", 7,
+                           from_date="2026-01-01T00:00:00Z", session=s3 or FakeS3(root))
     rows = store.fetch_light_rows()
     store.close()
     return result, rows
@@ -85,18 +84,20 @@ def test_objects_commit_oldest_first_across_regions(tmp_path):
     assert result.newest == "2026-11-12T03:50:00+00:00"
 
 
+def _otlp_export(model):
+    attrs = [{"key": "event.name", "value": {"stringValue": "api_request"}},
+             {"key": "model", "value": {"stringValue": model}},
+             {"key": "input_tokens", "value": {"intValue": "100"}}]
+    return {"resourceLogs": [{"resource": {"attributes": []},
+                              "scopeLogs": [{"logRecords": [{"timeUnixNano": "1762916400000000000",
+                                                             "attributes": attrs}]}]}]}
+
+
 def test_otlp_reads_one_export_per_line(tmp_path):
-    def export(model):
-        attrs = [{"key": "event.name", "value": {"stringValue": "api_request"}},
-                 {"key": "model", "value": {"stringValue": model}},
-                 {"key": "input_tokens", "value": {"intValue": "100"}}]
-        return {"resourceLogs": [{"resource": {"attributes": []},
-                                  "scopeLogs": [{"logRecords": [{"timeUnixNano": "1762916400000000000",
-                                                                 "attributes": attrs}]}]}]}
     root = tmp_path / "s3"
     (root / "otel").mkdir(parents=True)
     (root / "otel" / "20261112T030000Z.jsonl").write_text(
-        json.dumps(export("claude-sonnet-4-6")) + "\n" + json.dumps(export("claude-opus-4-6")) + "\n")
+        json.dumps(_otlp_export("claude-sonnet-4-6")) + "\n" + json.dumps(_otlp_export("claude-opus-4-6")) + "\n")
     _, rows = _read(tmp_path, root, source="otlp", prefix="otel")
     assert sorted(r["model"] for r in rows) == ["claude-opus-4-6", "claude-sonnet-4-6"]
 
@@ -106,3 +107,31 @@ def test_invocation_coerces_types_once():
                      metadata=None, timestamp=None, estimated_cost_usd=None)
     assert (inv.input_tokens, inv.output_tokens, inv.max_tokens) == (0, 7, None)
     assert (inv.messages, inv.metadata, inv.timestamp, inv.estimated_cost_usd) == ([], {}, "", 0.0)
+
+
+def test_two_sources_read_into_one_store(tmp_path):
+    bedrock_root, otel_root = tmp_path / "bedrock", tmp_path / "otel"
+    _write(bedrock_root, DAY.format(region="ap-southeast-2") + "20261112T030000Z_a.json.gz", [_record("b1"), _record("b2")])
+    (otel_root / "otel").mkdir(parents=True)
+    (otel_root / "otel" / "20261112T030000Z.json").write_text(json.dumps(_otlp_export("claude-sonnet-4-6")))
+    store = AuditStore(str(tmp_path / "a.db"))
+    for source, prefix, root in (("bedrock", "", bedrock_root), ("otlp", "otel", otel_root)):
+        read_to_store(store, SOURCES[source], "bucket", prefix, "ap-southeast-2", 7,
+                      from_date="2026-01-01T00:00:00Z", session=FakeS3(root))
+    rows = store.fetch_light_rows()
+    store.close()
+    assert sorted((r["operation"], r["model"]) for r in rows) == [
+        ("Converse", "global.anthropic.claude-sonnet-4-6"), ("Converse", "global.anthropic.claude-sonnet-4-6"),
+        ("api_request", "claude-sonnet-4-6")]
+
+
+def test_to_date_drops_objects_written_after_it(tmp_path):
+    from datetime import datetime, timezone
+    root = tmp_path / "s3"
+    _write(root, DAY.format(region="ap-southeast-2") + "20261112T030000Z_a.json.gz", [_record("in")])
+    _write(root, DAY.format(region="ap-southeast-2") + "20261112T050000Z_b.json.gz", [_record("out")])
+    store = AuditStore(str(tmp_path / "a.db"))
+    read_to_store(store, SOURCES["bedrock"], "bucket", "", "ap-southeast-2", 7, from_date="2026-01-01T00:00:00Z",
+                  to_date=datetime(2026, 11, 12, 4, tzinfo=timezone.utc), session=FakeS3(root))
+    assert [r["request_id"] for r in store.fetch_light_rows()] == ["in"]
+    store.close()

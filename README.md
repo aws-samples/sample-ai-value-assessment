@@ -104,6 +104,8 @@ cp aiva.example.toml aiva.toml   # set region, buckets and output
 aiva run --config aiva.toml
 ```
 
+Set the window with `from` and `to` dates (UTC, by when logs were written).
+A source can set `profile` or `role_arn` to read logs held in another account.
 `output` can be a local path or `s3://bucket/key`. Only add OpenTelemetry
 sources for usage that does not run through Bedrock, otherwise the same calls
 are counted twice.

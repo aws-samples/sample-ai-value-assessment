@@ -8,7 +8,7 @@ so a self-service customer gets one clear answer instead of a support ticket.
 """
 
 import boto3
-from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnectionError
+from botocore.exceptions import ClientError, EndpointConnectionError, NoCredentialsError, ProfileNotFound
 
 from aiva.sources import SOURCES
 
@@ -25,7 +25,17 @@ def run_preflight(sources, region, model_id):
 
     identity = _check_credentials(checks)
     for src in sources:
-        _check_bucket_access(checks, src.bucket, src.prefix, src.region, identity, source=src.type)
+        try:
+            session = src.session()
+        except (ClientError, ProfileNotFound) as e:
+            checks.append({
+                "name": "S3 log bucket access",
+                "status": "fail",
+                "detail": f"Could not get credentials for s3://{src.bucket}: {e}",
+                "hint": "Check the source's profile or role_arn, and that the role trusts this identity.",
+            })
+            continue
+        _check_bucket_access(checks, src.bucket, src.prefix, src.region, identity, source=src.type, session=session)
 
     if identity is None:
         checks.append({
@@ -69,7 +79,7 @@ def _check_credentials(checks):
     return None
 
 
-def _check_bucket_access(checks, bucket, prefix, region, identity, source="bedrock"):
+def _check_bucket_access(checks, bucket, prefix, region, identity, source="bedrock", session=boto3):
     """Confirm the log bucket exists, is in the given region, and is listable."""
     if identity is None:
         checks.append({
@@ -80,7 +90,7 @@ def _check_bucket_access(checks, bucket, prefix, region, identity, source="bedro
         })
         return
 
-    s3 = boto3.client("s3", region_name=region)
+    s3 = session.client("s3", region_name=region)
     try:
         s3.head_bucket(Bucket=bucket)
     except ClientError as e:

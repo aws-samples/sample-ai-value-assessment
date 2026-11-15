@@ -24,7 +24,7 @@ over from zero. Each row is keyed on its S3 object key (UNIQUE, INSERT OR
 IGNORE), so `resume_watermark()` can hand the reader a "resume from here"
 timestamp and re-listing near that boundary is a safe no-op for objects
 already committed, not a duplicate or a data-loss risk. See ingest.py's
-`read_to_store` for how `since` and this watermark compose.
+`read_to_store` for how `from_date` and this watermark compose.
 """
 
 import json

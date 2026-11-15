@@ -11,7 +11,6 @@ import json
 import pathlib
 import sqlite3
 import sys
-from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from fake_s3 import FakeS3  # noqa: E402
@@ -25,9 +24,8 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 def _read(store, s3):
     from aiva.ingest import read_to_store
     from aiva.sources import SOURCES
-    with mock.patch("boto3.client", return_value=s3):
-        return read_to_store(store, SOURCES["bedrock"], "bucket", "", "ap-southeast-2", 7,
-                             since="2026-01-01T00:00:00Z").newest
+    return read_to_store(store, SOURCES["bedrock"], "bucket", "", "ap-southeast-2", 7,
+                         from_date="2026-01-01T00:00:00Z", session=s3).newest
 
 
 def snapshot(root, db_path):

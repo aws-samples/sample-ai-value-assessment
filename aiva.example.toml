@@ -4,7 +4,8 @@
 # credentials (laptop or CloudShell) and creates no AWS resources.
 
 region = "ap-southeast-2"   # where aiva calls Bedrock to classify
-days = 7
+from = 2026-10-01           # UTC, by when logs were written (edges can be a few minutes off)
+to = 2026-10-31             # includes that day; leave out to read up to now
 model = "global.anthropic.claude-sonnet-4-6"
 output = "report"           # local path or s3://bucket/key, no extension
 # format = "all"            # html, md, json, both (html+md) or all
@@ -17,6 +18,8 @@ type = "bedrock"
 bucket = "my-bedrock-invocation-logs"
 prefix = ""                 # the key prefix set in Bedrock logging, often empty
 # region = "ap-southeast-2" # bucket region, defaults to the region above
+# profile = "log-archive"   # AWS config profile to read this source with
+# role_arn = "arn:aws:iam::222233334444:role/aiva-read-logs"  # or a role to assume
 
 # OpenTelemetry exports (Claude Code, Cowork). Only add usage that does not
 # run through Bedrock: Bedrock-backed usage is already in the logs above and
