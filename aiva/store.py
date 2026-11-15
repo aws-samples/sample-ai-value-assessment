@@ -172,6 +172,16 @@ class AuditStore:
         ).fetchone()
         return row[0], row[1]
 
+    def unpriced_summary(self):
+        """Return (count, models) for invocations that used tokens but have no price."""
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT model, COUNT(*) FROM invocations WHERE is_audit_overhead = 0 AND cost_priced = 0 "
+            "AND input_tokens + output_tokens + cache_read_tokens + cache_write_tokens > 0 "
+            "GROUP BY model ORDER BY model"
+        ).fetchall()
+        return sum(n for _, n in rows), [m or "unknown" for m, _ in rows]
+
     def close(self):
         if hasattr(self._local, "conn"):
             self._local.conn.close()

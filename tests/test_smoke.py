@@ -372,6 +372,36 @@ def test_store_fetch_full_invocations_returns_only_requested_ids_in_order(tmp_pa
     store.close()
 
 
+def test_store_unpriced_summary_counts_only_unpriced_usage(tmp_path):
+    from dataclasses import replace
+    store = AuditStore(str(tmp_path / "audit.db"))
+    qwen = replace(_record(cost=0.0), model="qwen.qwen3-vl-235b-a22b", cost_priced=False)
+    no_tokens = replace(qwen, model="none", input_tokens=0, output_tokens=0)
+    store.insert_invocations([
+        (_record(), "k1", "2026-01-01T00:00:00Z"),
+        (qwen, "k2", "2026-01-01T00:01:00Z"),
+        (qwen, "k3", "2026-01-01T00:02:00Z"),
+        (no_tokens, "k4", "2026-01-01T00:03:00Z"),
+        (replace(_record(overhead=True), cost_priced=False), "k5", "2026-01-01T00:04:00Z"),
+    ])
+    assert store.unpriced_summary() == (2, ["qwen.qwen3-vl-235b-a22b"])
+    store.close()
+
+
+def test_reports_show_unpriced_invocations(tmp_path):
+    unpriced = (3, ["qwen.qwen3-vl-235b-a22b", "<b>arn</b>"])
+    generate_html_report([_assessment()], str(tmp_path / "r.html"), unpriced=unpriced)
+    html = (tmp_path / "r.html").read_text()
+    assert "leaves out 3 invocations" in html and "&lt;b&gt;arn" in html and "<b>arn" not in html
+    generate_report([_assessment()], str(tmp_path / "r.md"), unpriced=unpriced)
+    assert "| Not priced (not in the total) | 3 invocations: qwen" in (tmp_path / "r.md").read_text()
+    generate_json_report([_assessment()], str(tmp_path / "r.json"), unpriced=unpriced)
+    summary = json.loads((tmp_path / "r.json").read_text())["summary"]
+    assert summary["unpriced_invocations"] == 3 and summary["unpriced_models"][0] == "qwen.qwen3-vl-235b-a22b"
+    generate_html_report([_assessment()], str(tmp_path / "none.html"))
+    assert "leaves out" not in (tmp_path / "none.html").read_text()
+
+
 def test_store_fetch_full_invocations_empty_ids_returns_empty(tmp_path):
     store = AuditStore(str(tmp_path / "audit.db"))
     assert store.fetch_full_invocations([]) == []
@@ -436,7 +466,7 @@ def test_otlp_normalise_log_record_with_token_counts():
     assert record.input_tokens == 1000
     assert record.output_tokens == 200
     assert record.caller == "test-user"
-    assert record.cost_priced is False  # OTLP cost is always an estimate
+    assert record.cost_priced is True  # priced from the table, no cost_usd in the event
     assert record.estimated_cost_usd > 0
     assert record.metadata["session_id"] == "sess-123"
     assert record.metadata["source_format"] == "otlp"
@@ -612,7 +642,7 @@ def test_bedrock_list_prefixes_falls_back_to_whole_prefix():
 
 
 def test_pricing_matches_published_bedrock_rates():
-    # AWS Pricing API, us-west-2, 2026-10-27, $ per 1M tokens.
+    # AWS Price List API, $ per 1M tokens (us-west-2 2026-10-27, us-east-1 2026-11-15).
     from aiva.pricing import estimate_cost
     m = 1_000_000
     cases = [
@@ -621,11 +651,19 @@ def test_pricing_matches_published_bedrock_rates():
         ("arn:aws:bedrock:us-west-2:111122223333:inference-profile/us.anthropic.claude-sonnet-4-6", 3.3, 16.5, 0.33, 4.125),
         ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.1, 5.5, 0.11, 1.375),
         ("us.anthropic.claude-sonnet-4-20250514-v1:0", 3.0, 15.0, 0.30, 3.75),
+        ("global.anthropic.claude-sonnet-5-5", 2.0, 10.0, 0.10, 2.5),
+        ("anthropic.claude-3-5-haiku-20241022-v1:0", 0.8, 4.0, 0.08, 1.0),
+        ("anthropic.claude-3-haiku-20240307-v1:0", 0.25, 1.25, 0.025, 0.3125),
     ]
     for model, inp, out, read, write in cases:
         for tokens, expected in [((m, 0, 0, 0), inp), ((0, m, 0, 0), out), ((0, 0, m, 0), read), ((0, 0, 0, m), write)]:
             cost, priced = estimate_cost(tokens[0], tokens[1], model, tokens[2], tokens[3])
             assert priced and abs(cost - expected) < 1e-6, (model, tokens, cost, expected)
+
+
+def test_pricing_leaves_other_providers_unpriced():
+    for model in ("apac.amazon.nova-pro-v1:0", "global.amazon.nova-2-lite-v1:0", "qwen.qwen3-vl-235b-a22b"):
+        assert get_pricing(model)[1] is False, model
 
 
 def test_pricing_opus_5_5_cache_read_rate():

@@ -161,7 +161,7 @@ def _run_audit_with_store(store, config):
 
     # Step 5: Generate report
     console.print("[5/5] Generating report...")
-    _write_reports(assessments, config)
+    _write_reports(assessments, config, store.unpriced_summary())
 
     # Show audit overhead
     if audit_count:
@@ -170,7 +170,7 @@ def _run_audit_with_store(store, config):
     console.print()
 
 
-def _write_reports(assessments, config):
+def _write_reports(assessments, config, unpriced=(0, [])):
     """Write the reports to config.output, a local path or s3://bucket/key (no extension)."""
     run_meta = {
         "sources": [{k: v for k, v in vars(src).items() if v} for src in config.sources], "region": config.region,
@@ -189,13 +189,16 @@ def _write_reports(assessments, config):
 
     written = []
     if fmt in ("html", "both", "all"):
-        generate_html_report(assessments, f"{output}.html", show_samples=show_samples, source=source)
+        generate_html_report(assessments, f"{output}.html", show_samples=show_samples, source=source,
+                             unpriced=unpriced)
         written.append(".html")
     if fmt in ("md", "both", "all"):
-        generate_report(assessments, f"{output}.md", show_samples=show_samples, source=source)
+        generate_report(assessments, f"{output}.md", show_samples=show_samples, source=source,
+                        unpriced=unpriced)
         written.append(".md")
     if fmt in ("json", "all"):
-        generate_json_report(assessments, f"{output}.json", meta=run_meta, show_samples=show_samples)
+        generate_json_report(assessments, f"{output}.json", meta=run_meta, show_samples=show_samples,
+                             unpriced=unpriced)
         written.append(".json")
 
     if to_s3:

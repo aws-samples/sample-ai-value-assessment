@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 
 
-def generate_json_report(assessments, output_path, meta=None, show_samples=False):
+def generate_json_report(assessments, output_path, meta=None, show_samples=False, unpriced=(0, [])):
     """Write a machine-readable JSON report (Prowler-style, one file).
 
     Structured for downstream tooling: a summary block plus one record per use
@@ -27,6 +27,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
             "sessions_analysed": total_sessions,
             "invocations_analysed": total_invocations,
             "total_estimated_cost_usd": round(total_cost, 4),
+            "unpriced_invocations": unpriced[0], "unpriced_models": unpriced[1],
             "stop": _rec("STOP"), "refine": _rec("REFINE"), "expand": _rec("EXPAND"),
         },
         "use_cases": [],
@@ -71,7 +72,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
         json.dump(report, f, indent=2)
 
 
-def generate_report(assessments, output_path, show_samples=False, source="bedrock"):
+def generate_report(assessments, output_path, show_samples=False, source="bedrock", unpriced=(0, [])):
     """Generate a markdown report: Business view first, Technical view second."""
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]
@@ -92,6 +93,8 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
     lines.append(f"| Sessions analysed | {total_sessions:,} |")
     lines.append(f"| Invocations analysed | {total_invocations:,} |")
     lines.append(f"| Total estimated cost | ${total_cost:.2f} |")
+    if unpriced[0]:
+        lines.append(f"| Not priced (not in the total) | {unpriced[0]:,} invocations: {', '.join(unpriced[1])} |")
     lines.append(f"| Recommend STOP | {len(stop)} |")
     lines.append(f"| Recommend REFINE | {len(refine)} |")
     lines.append(f"| Recommend EXPAND | {len(expand)} |")

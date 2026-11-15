@@ -115,7 +115,7 @@ def _normalise_log_record(log_record, resource_attrs):
     timestamp = _nano_to_iso(time_nano)
 
     model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _extract_model_and_tokens(attrs, resource_attrs)
-    cost, cost_from_source = _extract_cost(attrs, input_tokens, output_tokens, model, cache_read_tokens, cache_write_tokens)
+    cost, priced = _extract_cost(attrs, input_tokens, output_tokens, model, cache_read_tokens, cache_write_tokens)
     caller = _extract_caller(attrs, resource_attrs)
     session_key = (attrs.get("session.id")
                    or resource_attrs.get("session.id")
@@ -150,7 +150,7 @@ def _normalise_log_record(log_record, resource_attrs):
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         estimated_cost_usd=cost,
-        cost_priced=cost_from_source,
+        cost_priced=priced,
         system_prompt=system_prompt,
         tools=tools,
         messages=messages,
@@ -185,7 +185,7 @@ def _normalise_span_record(span, resource_attrs):
     timestamp = _nano_to_iso(time_nano)
 
     model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _extract_model_and_tokens(attrs, resource_attrs)
-    cost, cost_from_source = _extract_cost(attrs, input_tokens, output_tokens, model, cache_read_tokens, cache_write_tokens)
+    cost, priced = _extract_cost(attrs, input_tokens, output_tokens, model, cache_read_tokens, cache_write_tokens)
     caller = _extract_caller(attrs, resource_attrs)
     session_key = (attrs.get("session.id")
                    or resource_attrs.get("session.id")
@@ -211,7 +211,7 @@ def _normalise_span_record(span, resource_attrs):
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         estimated_cost_usd=cost,
-        cost_priced=cost_from_source,
+        cost_priced=priced,
         system_prompt=system_prompt,
         tools=tools,
         messages=messages,
@@ -246,16 +246,15 @@ def _extract_model_and_tokens(attrs, resource_attrs):
 
 def _extract_cost(attrs, input_tokens, output_tokens, model,
                   cache_read_tokens, cache_write_tokens):
-    """Extract cost, preferring source-reported cost_usd when available."""
+    """Return (cost, priced), preferring source-reported cost_usd when available."""
     source_cost = attrs.get("cost_usd")
     if source_cost is not None:
         try:
             return float(source_cost), True
         except (ValueError, TypeError):
             pass
-    cost, _ = estimate_cost(input_tokens, output_tokens, model,
-                            cache_read_tokens, cache_write_tokens)
-    return cost, False
+    return estimate_cost(input_tokens, output_tokens, model,
+                         cache_read_tokens, cache_write_tokens)
 
 
 def _extract_caller(attrs, resource_attrs):

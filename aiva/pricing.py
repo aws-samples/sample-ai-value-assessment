@@ -1,22 +1,20 @@
-# Per-1K-token on-demand prices (USD), sourced from the model catalog
-# ($/1M / 1000). Keyed by the canonical model family token found in the
-# model ID. Longest matching key wins so opus-4-8 never collides with a
-# shorter opus prefix. Cache read/write are priced as ratios of the input
-# rate (Bedrock/Anthropic 5-minute-TTL convention): read ~0.1x, write ~1.25x,
-# unless a family sets its own "cache_read" rate.
+# Per-1K-token on-demand prices (USD) for Anthropic models on Bedrock
+# ($/1M / 1000), global inference profile rates. Checked against the AWS
+# Price List API (AmazonBedrockFoundationModels, us-east-1, 2026-11-15).
+# Other providers are not priced and show as unpriced in the report.
+# Keyed by the canonical model family token found in the model ID. Longest
+# matching key wins so opus-4-8 never collides with a shorter opus prefix.
+# Cache read/write are priced as ratios of the input rate (5-minute TTL):
+# read 0.1x, write 1.25x, unless a family sets its own "cache_read" rate.
 #
 # NOTE: on-demand estimate only. Provisioned throughput, batch (-50%), and
 # 1-hour cache TTL (2x write) are NOT modelled - see get_pricing.
 PRICING_PER_1K = {
-    # 5.x family: Anthropic list prices; not in the AWS Pricing API yet
-    # (2026-10-27). Opus 5.5 is confirmed against a real Bedrock bill:
-    # us. profile billed $4.40 / $22 / $0.22 read / $5.50 write per 1M,
-    # i.e. these rates x GEO_PREMIUM. The others are unconfirmed.
     "claude-fable-5-1": {"input": 0.010, "output": 0.050, "cache_read": 0.00025},
     "claude-fable-5": {"input": 0.010, "output": 0.050},
     "claude-opus-5-5": {"input": 0.004, "output": 0.020, "cache_read": 0.0002},
     "claude-opus-5": {"input": 0.005, "output": 0.025},
-    "claude-sonnet-5-5": {"input": 0.002, "output": 0.010},
+    "claude-sonnet-5-5": {"input": 0.002, "output": 0.010, "cache_read": 0.0001},
     "claude-sonnet-5": {"input": 0.002, "output": 0.010},
     "claude-opus-4-8": {"input": 0.005, "output": 0.025},
     "claude-opus-4-7": {"input": 0.005, "output": 0.025},
@@ -26,22 +24,18 @@ PRICING_PER_1K = {
     "claude-sonnet-4-5": {"input": 0.003, "output": 0.015},
     "claude-sonnet-4": {"input": 0.003, "output": 0.015},
     "claude-haiku-4-5": {"input": 0.001, "output": 0.005},
-    "claude-haiku-3-5": {"input": 0.0008, "output": 0.004},
-    "claude-haiku-3": {"input": 0.00025, "output": 0.00125},
-    "nova-pro": {"input": 0.0008, "output": 0.0032},
-    "nova-lite": {"input": 0.00006, "output": 0.00024},
-    "nova-micro": {"input": 0.000035, "output": 0.00014},
-    "titan-text-express": {"input": 0.0002, "output": 0.0006},
+    # Bedrock names the 3.x models version first: anthropic.claude-3-5-haiku-...
+    "claude-3-5-haiku": {"input": 0.0008, "output": 0.004},
+    "claude-3-haiku": {"input": 0.00025, "output": 0.00125},
 }
 
 CACHE_READ_MULTIPLIER = 0.1  # unless the family sets its own "cache_read" rate
 CACHE_WRITE_MULTIPLIER = 1.25
 
 # Claude 4.5 and later cost 10% more through a geographic ("us.", "eu.", ...)
-# or in-region model ID than through a "global." inference profile (AWS
-# Pricing API, us-west-2, 2026-10-27). The table above holds global rates.
-# Sonnet 4 and older have one price. Opus 5.5 confirmed from a bill; other
-# 4.7+ and 5.x families are assumed to follow.
+# or in-region model ID than through a "global." inference profile. The table
+# above holds global rates. Sonnet 4 and older have one price. Checked for
+# every family against the Price List API (2026-11-15).
 GEO_PREMIUM = 1.1
 GEO_PREMIUM_FAMILIES = {
     "claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-5",

@@ -394,7 +394,7 @@ def _use_case_id(a):
     return "uc_" + hashlib.sha256(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
-def generate_html_report(assessments, output_path, show_samples=False, source="bedrock"):
+def generate_html_report(assessments, output_path, show_samples=False, source="bedrock", unpriced=(0, [])):
     """Generate a use-case HTML dashboard: Business summary + Technical drill-down.
 
     Each assessment is a de-duplicated business USE CASE that may span several
@@ -410,6 +410,10 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
     expand = [a for a in assessments if a["recommendation"] == "EXPAND"]
 
     total_cost = sum(a["metrics"]["total_cost_usd"] for a in assessments)
+    unpriced_note = ""
+    if unpriced[0]:
+        unpriced_note = (f'<div class="source-caveat">Total Spend leaves out {unpriced[0]:,} invocations with no price. '
+                         f'Only Anthropic models are priced. Models: {_escape(", ".join(unpriced[1]))}</div>')
     total_invocations = sum(a["metrics"]["invocation_count"] for a in assessments)
     total_sessions = sum(a["metrics"].get("session_count", 1) for a in assessments)
     stop_cost = sum(a["metrics"]["total_cost_usd"] for a in stop)
@@ -478,6 +482,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
         </div>
 
         {'<div class="source-caveat">Data source: OpenTelemetry telemetry. Cost figures are estimated from token counts and published model pricing. They do not reflect negotiated rates, provisioned throughput, or batch discounts.</div>' if source == "otlp" else ""}
+        {unpriced_note}
         <div class="cost-bar-section">
             <h3>Cost by Recommendation</h3>
             {_render_cost_bar(stop_cost, refine_cost, expand_cost, total_cost)}
