@@ -38,17 +38,7 @@ or Cowork on Bedrock already appear in the Bedrock logs, and would be counted tw
 
 ## Permissions
 
-The identity running aiva needs:
-
-1. `s3:ListBucket` and `s3:GetObject` on each source bucket, plus `kms:Decrypt` if
-   the bucket uses a customer managed KMS key.
-2. `bedrock:InvokeModel` on the classification model (Converse uses this action).
-   A `global.` or geo profile can route to other regions, so allow the foundation
-   model in every region: `arn:aws:bedrock:*::foundation-model/*`.
-3. `sts:AssumeRole` on any `role_arn`, and that role's trust policy must allow it.
-4. `s3:PutObject` on the output bucket if `output` is an `s3://` path.
-
-[`iam-policy.json`](iam-policy.json) covers 1 and 2.
+See [Before you start](../README.md#before-you-start) in the README.
 
 ## Network and endpoints
 

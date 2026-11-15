@@ -34,28 +34,61 @@ Give this prompt to an AI coding assistant with access to your AWS
 credentials (for example Claude Code or Kiro):
 
 ```text
-Clone https://github.com/aws-samples/sample-ai-value-assessment and follow its README to run `aiva run` against my Bedrock Model Invocation Logs in account <ACCOUNT_ID>, for the last 7 days.
+Run the AI Value Assessment (https://github.com/aws-samples/sample-ai-value-assessment) against the Bedrock Model Invocation Logs in AWS account <ACCOUNT_ID>, region <REGION>, for <FROM_DATE> to <TO_DATE>.
+
+- Install it and run `aiva run` with a config file, as described in the README's "Run it" section.
+- Use my current AWS credentials. Do not create or change any AWS resources.
+- Run the preflight checks first. If any check fails, stop and tell me what failed and what permission or setting is missing.
+- Write the report to <PATH or s3://bucket/key> and give me a short summary of the use cases and their recommendations.
 ```
+
+## Before you start
+
+1. **Turn on Model Invocation Logging** (one-time, account admin): in the
+   Bedrock console under Settings, send logs to an S3 bucket and note the bucket
+   and key prefix. Logs only exist from then on, so let a few days of usage
+   build up.
+2. **Enable the classification model** in Bedrock (default
+   `global.anthropic.claude-sonnet-4-6`, or set `model` in the config).
+3. **Permissions for the person running it:**
+
+| Needs | When |
+|---|---|
+| `s3:ListBucket` and `s3:GetObject` on the log bucket, `bedrock:InvokeModel` on the model ([docs/iam-policy.json](docs/iam-policy.json)) | Always |
+| `kms:Decrypt` on the bucket's key | The log bucket uses a customer managed KMS key |
+| `s3:PutObject` on the output bucket | `output` is an `s3://` path |
+| `sts:AssumeRole` on a role in the log account, which trusts your role and can read the bucket | Logs are in another account (config `role_arn`) |
+
+## Where to run it
+
+1. **AWS CloudShell**, in the account and region of the logs. Credentials are
+   already set up and nothing is created. Sessions end after about 20 minutes
+   idle and home storage is about 1 GB, so it suits a week of a team's or
+   department's logs.
+2. **A laptop** with your usual AWS credentials (for example `aws sso login`).
+   No session limit; use this for large windows.
+3. **The CloudFormation stack** ([below](#deploy-with-cloudformation)), if your
+   account allows CodeBuild and one source over the last N days is enough.
 
 ## Run it
 
-Needs Python 3.11+ and AWS credentials with the permissions in
-[docs/config.md](docs/config.md#permissions).
+Needs Python 3.11 or later. [uv](https://docs.astral.sh/uv/) installs it if
+your machine has an older one.
 
 ```bash
+pip install --user uv
 git clone https://github.com/aws-samples/sample-ai-value-assessment.git
 cd sample-ai-value-assessment
-uv venv && source .venv/bin/activate
+uv venv --python 3.11 && source .venv/bin/activate
 uv pip install .
 
 cp aiva.example.toml aiva.toml   # set region, from/to dates, buckets and output
 aiva run --config aiva.toml
 ```
 
-The config lists one or more log sources, and they all go into one report. A
-source can set `profile` or `role_arn` to read logs held in another account,
-such as a central log archive. Every setting is described in
-[docs/config.md](docs/config.md).
+Preflight checks credentials, bucket access and model access before anything
+is read. The config lists one or more log sources, and they all go into one
+report. Every setting is described in [docs/config.md](docs/config.md).
 
 The report (`.html`, `.md` and `.json`) contains real prompt and response
 excerpts. Treat it as sensitive: do not commit or share it outside your team.
