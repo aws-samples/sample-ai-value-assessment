@@ -88,3 +88,10 @@ def test_reports_upload_to_s3_output():
         _write_reports([], config)
     keys = sorted(call.args[1:] for call in s3.upload_file.call_args_list)
     assert keys == [("reports", "aiva/run1.html"), ("reports", "aiva/run1.json"), ("reports", "aiva/run1.md")]
+
+
+def test_every_setting_is_documented():
+    from aiva.config import _RUN_KEYS, _SOURCE_KEYS
+    doc = (ROOT / "docs" / "config.md").read_text()
+    missing = [k for k in sorted((_RUN_KEYS - {"sources"}) | _SOURCE_KEYS) if f"| `{k}` |" not in doc]
+    assert not missing, f"add to docs/config.md: {missing}"

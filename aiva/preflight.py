@@ -188,6 +188,7 @@ def _check_model_access(checks, region, model_id):
             modelId=model_id,
             messages=[{"role": "user", "content": [{"text": "ping"}]}],
             inferenceConfig={"maxTokens": 1, "temperature": 0},
+            requestMetadata={"source": "aiva-audit"},  # so a later audit does not count it as usage
         )
         checks.append({
             "name": "Bedrock model access",

@@ -715,3 +715,12 @@ def test_converse_response_text_is_extracted():
     assert _extract_response_text(body) == "first second"
     assert _extract_response_text({"output": "not a message"}) == ""
     assert _extract_response_text({"content": [{"type": "text", "text": "anthropic"}]}) == "anthropic"
+
+
+def test_preflight_ping_is_tagged_as_audit_overhead():
+    from unittest import mock
+    from aiva.preflight import _check_model_access
+    bedrock = mock.Mock()
+    with mock.patch("boto3.client", return_value=bedrock):
+        _check_model_access([], "ap-southeast-2", "global.anthropic.claude-sonnet-4-6")
+    assert bedrock.converse.call_args.kwargs["requestMetadata"] == {"source": "aiva-audit"}
