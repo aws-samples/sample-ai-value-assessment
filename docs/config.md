@@ -4,6 +4,19 @@
 [`aiva.example.toml`](../aiva.example.toml). Unknown or missing settings stop the
 run with a message naming them.
 
+The file can also be in S3: `aiva run --config s3://my-bucket/aiva.toml`. It is read
+with the same AWS credentials as the run, which then need `s3:GetObject` on that
+object:
+
+```json
+{
+  "Sid": "ReadConfig",
+  "Effect": "Allow",
+  "Action": "s3:GetObject",
+  "Resource": "arn:aws:s3:::<CONFIG_BUCKET>/<CONFIG_KEY>"
+}
+```
+
 ## Run settings
 
 | Setting | Required | Default | What it does |
