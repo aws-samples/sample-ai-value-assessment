@@ -3,6 +3,8 @@ import hashlib
 import html as html_lib
 from datetime import datetime, timezone
 
+from aiva.pricing import COST_NOTE, cost_range
+
 # Static, no per-report interpolation (checked: contains no Python f-string
 # placeholders), so its content and CSP hash never change between reports.
 # Kept as a plain string, not an f-string, so brace characters are literal
@@ -410,6 +412,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
     expand = [a for a in assessments if a["recommendation"] == "EXPAND"]
 
     total_cost = sum(a["metrics"]["total_cost_usd"] for a in assessments)
+    low_cost, high_cost = cost_range(total_cost)
     total_invocations = sum(a["metrics"]["invocation_count"] for a in assessments)
     total_sessions = sum(a["metrics"].get("session_count", 1) for a in assessments)
     stop_cost = sum(a["metrics"]["total_cost_usd"] for a in stop)
@@ -448,8 +451,8 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
 
         <div class="summary-grid">
             <div class="card">
-                <div class="label">Total Spend</div>
-                <div class="value">${total_cost:.2f}</div>
+                <div class="label">Estimated Spend</div>
+                <div class="value">${low_cost:.2f} to ${high_cost:.2f}</div>
             </div>
             <div class="card">
                 <div class="label">Use Cases</div>
@@ -477,7 +480,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
             </div>
         </div>
 
-        {'<div class="source-caveat">Data source: OpenTelemetry telemetry. Cost figures are estimated from token counts and published model pricing. They do not reflect negotiated rates, provisioned throughput, or batch discounts.</div>' if source == "otlp" else ""}
+        <div class="source-caveat">{COST_NOTE} Use case costs are midpoints.</div>
         <div class="cost-bar-section">
             <h3>Cost by Recommendation</h3>
             {_render_cost_bar(stop_cost, refine_cost, expand_cost, total_cost)}

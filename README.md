@@ -157,9 +157,11 @@ The stack creates a CodeBuild project, an IAM role scoped to
 [`docs/iam-policy.json`](docs/iam-policy.json) plus write to the output bucket,
 and the destination S3 bucket (encrypted, public-access blocked, HTTPS-only).
 
-**Cost estimate note:** costs are estimated from token counts and published
-model pricing (or, for OpenTelemetry, the cost the tool reports). They do not
-reflect negotiated rates, provisioned throughput or batch discounts.
+**Cost estimate note:** costs are a ballpark from token counts only, at
+Sonnet-class rates ($3 input, $15 output per 1M tokens) whatever the model.
+The report shows a range from Haiku-class ($1 / $5) to Opus-class ($5 / $25)
+rates. Negotiated rates, provisioned throughput and batch are not taken into
+account.
 
 ## Reading the report
 

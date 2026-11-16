@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timezone
 
+from aiva.pricing import COST_NOTE, cost_range
+
 
 def generate_json_report(assessments, output_path, meta=None, show_samples=False):
     """Write a machine-readable JSON report (Prowler-style, one file).
@@ -27,6 +29,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
             "sessions_analysed": total_sessions,
             "invocations_analysed": total_invocations,
             "total_estimated_cost_usd": round(total_cost, 4),
+            "estimated_cost_range_usd": [round(c, 4) for c in cost_range(total_cost)],
             "stop": _rec("STOP"), "refine": _rec("REFINE"), "expand": _rec("EXPAND"),
         },
         "use_cases": [],
@@ -71,7 +74,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
         json.dump(report, f, indent=2)
 
 
-def generate_report(assessments, output_path, show_samples=False, source="bedrock"):
+def generate_report(assessments, output_path, show_samples=False):
     """Generate a markdown report: Business view first, Technical view second."""
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]
@@ -91,7 +94,8 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
     lines.append(f"| Distinct use cases | {len(assessments)} |")
     lines.append(f"| Sessions analysed | {total_sessions:,} |")
     lines.append(f"| Invocations analysed | {total_invocations:,} |")
-    lines.append(f"| Total estimated cost | ${total_cost:.2f} |")
+    low, high = cost_range(total_cost)
+    lines.append(f"| Estimated cost | ${low:.2f} to ${high:.2f} (midpoint ${total_cost:.2f}) |")
     lines.append(f"| Recommend STOP | {len(stop)} |")
     lines.append(f"| Recommend REFINE | {len(refine)} |")
     lines.append(f"| Recommend EXPAND | {len(expand)} |")
@@ -99,10 +103,7 @@ def generate_report(assessments, output_path, show_samples=False, source="bedroc
         stop_cost = sum(a["metrics"]["total_cost_usd"] for a in stop)
         lines.append(f"| Potential savings (STOP) | ${stop_cost:.2f} |")
 
-    if source == "otlp":
-        lines.append("\n> **Data source: OpenTelemetry.** Cost figures are estimated from "
-                      "token counts and published model pricing. They do not reflect "
-                      "negotiated rates, provisioned throughput, or batch discounts.")
+    lines.append(f"\n> {COST_NOTE} Use case costs are midpoints.")
 
     # -------------------------------------------------------------------
     # Business view

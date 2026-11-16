@@ -7,7 +7,7 @@ Run: source .venv/bin/activate && pytest tests/ -v
 """
 import json
 
-from aiva.pricing import get_pricing, PRICING_PER_1K, UNKNOWN_PRICING
+from aiva.pricing import cost_range, estimate_cost
 from aiva.cli import _group_into_sessions
 from aiva.classifier import _apply_verdict_rubric, project_monthly_cost, cap_use_cases, _build_cluster
 from aiva.html_reporter import _use_case_id, generate_html_report
@@ -21,28 +21,21 @@ from aiva.store import AuditStore
 
 
 # ---------------------------------------------------------------------------
-# Pricing: exact-match, fail-loud, longest-match wins
+# Pricing: one ballpark rate for every model, shown as a range
 # ---------------------------------------------------------------------------
 
-def test_pricing_longest_match_wins():
-    # opus-4-8 must not collide with a shorter "opus" prefix that isn't there.
-    pricing, priced = get_pricing("global.anthropic.claude-opus-4-8-20260101-v1:0")
-    assert priced is True
-    assert pricing["input"] == PRICING_PER_1K["claude-opus-4-8"]["input"]
-    assert pricing["output"] == PRICING_PER_1K["claude-opus-4-8"]["output"]
+def test_estimate_cost_uses_sonnet_class_rates_for_any_tokens():
+    m = 1_000_000
+    assert estimate_cost(m, 0) == 3.0
+    assert estimate_cost(0, m) == 15.0
+    assert abs(estimate_cost(0, 0, cache_read_tokens=m) - 0.30) < 1e-9
+    assert abs(estimate_cost(0, 0, cache_write_tokens=m) - 3.75) < 1e-9
 
 
-def test_pricing_unknown_model_fails_loud():
-    pricing, priced = get_pricing("some.unknown.model-v9")
-    assert priced is False
-    assert pricing == UNKNOWN_PRICING
-
-
-def test_pricing_sonnet_vs_opus_distinct_rates():
-    sonnet, _ = get_pricing("us.anthropic.claude-sonnet-4-6-v1:0")
-    opus, _ = get_pricing("us.anthropic.claude-opus-4-6-v1:0")
-    assert sonnet != opus
-    assert sonnet["input"] < opus["input"]
+def test_cost_range_spans_haiku_to_opus_class_rates():
+    low, high = cost_range(estimate_cost(1_000_000, 1_000_000))
+    assert abs(low - 6.0) < 1e-9    # $1 + $5
+    assert abs(high - 30.0) < 1e-9  # $5 + $25
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +275,7 @@ def test_html_report_generates_and_escapes_content(tmp_path):
     generate_html_report([_assessment()], str(out))
     html = out.read_text()
     assert "Test Use Case" in html
+    assert "Estimated Spend" in html and "Sonnet-class rates" in html
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" not in html  # samples omitted entirely by default
 
@@ -299,6 +293,7 @@ def test_markdown_report_generates(tmp_path):
     md = out.read_text()
     assert "Test Use Case" in md
     assert "REFINE - Optimise These" in md
+    assert "| Estimated cost | $" in md and "Sonnet-class rates" in md
 
 
 def test_json_report_generates_and_is_valid_json(tmp_path):
@@ -307,6 +302,8 @@ def test_json_report_generates_and_is_valid_json(tmp_path):
     data = json.loads(out.read_text())
     assert data["schema"] == "aiva.audit.v1"
     assert data["summary"]["refine"] == 1
+    low, high = data["summary"]["estimated_cost_range_usd"]
+    assert low < data["summary"]["total_estimated_cost_usd"] < high
     assert data["use_cases"][0]["name"] == "Test Use Case"
 
 
@@ -323,7 +320,7 @@ def _record(caller="user-a", cost=0.05, overhead=False):
     metadata = {"source": "aiva-audit"} if overhead else {"session_id": "sess-1"}
     return Invocation(
         timestamp="2026-01-01T00:00:00Z", model="claude-sonnet-4-6",
-        input_tokens=100, output_tokens=50, estimated_cost_usd=cost, cost_priced=True,
+        input_tokens=100, output_tokens=50, estimated_cost_usd=cost,
         caller=caller, operation="Converse", request_id="req-1",
         max_tokens=1000, metadata=metadata,
         system_prompt="You are a helpful assistant.",
@@ -346,7 +343,7 @@ def test_store_fetch_light_rows_excludes_overhead_and_matches_column_order(tmp_p
     assert set(rows[0].keys()) == {
         "id", "timestamp", "model", "input_tokens", "output_tokens",
         "cache_read_tokens", "cache_write_tokens", "estimated_cost_usd",
-        "cost_priced", "caller", "operation", "request_id", "max_tokens",
+        "caller", "operation", "request_id", "max_tokens",
         "session_key", "is_audit_overhead",
     }
     store.close()
@@ -436,7 +433,6 @@ def test_otlp_normalise_log_record_with_token_counts():
     assert record.input_tokens == 1000
     assert record.output_tokens == 200
     assert record.caller == "test-user"
-    assert record.cost_priced is False  # OTLP cost is always an estimate
     assert record.estimated_cost_usd > 0
     assert record.metadata["session_id"] == "sess-123"
     assert record.metadata["source_format"] == "otlp"
@@ -609,29 +605,6 @@ def test_bedrock_list_prefixes_falls_back_to_whole_prefix():
     from aiva.reader import list_prefixes
     s3 = _FakeDelimiterS3(["logs/AWSLogs/custom-layout/x.json"])
     assert list_prefixes(s3, "b", "logs/AWSLogs/", datetime.now(timezone.utc)) == ["logs/AWSLogs/"]
-
-
-def test_pricing_matches_published_bedrock_rates():
-    # AWS Pricing API, us-west-2, 2026-10-27, $ per 1M tokens.
-    from aiva.pricing import estimate_cost
-    m = 1_000_000
-    cases = [
-        ("global.anthropic.claude-opus-4-6-v1", 5.0, 25.0, 0.50, 6.25),
-        ("us.anthropic.claude-opus-4-6-v1", 5.5, 27.5, 0.55, 6.875),
-        ("arn:aws:bedrock:us-west-2:111122223333:inference-profile/us.anthropic.claude-sonnet-4-6", 3.3, 16.5, 0.33, 4.125),
-        ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 1.1, 5.5, 0.11, 1.375),
-        ("us.anthropic.claude-sonnet-4-20250514-v1:0", 3.0, 15.0, 0.30, 3.75),
-    ]
-    for model, inp, out, read, write in cases:
-        for tokens, expected in [((m, 0, 0, 0), inp), ((0, m, 0, 0), out), ((0, 0, m, 0), read), ((0, 0, 0, m), write)]:
-            cost, priced = estimate_cost(tokens[0], tokens[1], model, tokens[2], tokens[3])
-            assert priced and abs(cost - expected) < 1e-6, (model, tokens, cost, expected)
-
-
-def test_pricing_opus_5_5_cache_read_rate():
-    from aiva.pricing import estimate_cost
-    cost, _ = estimate_cost(0, 0, "global.anthropic.claude-opus-5-5", cache_read_tokens=1_000_000)
-    assert abs(cost - 0.20) < 1e-9
 
 
 def test_read_object_keeps_every_record_in_a_batched_object():

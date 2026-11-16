@@ -179,7 +179,7 @@ def _write_reports(assessments, config):
         "to": config.to_date.isoformat() if config.to_date else None,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    # The OTLP caveat (estimated cost) applies when any source is OTLP.
+    # The HTML subtitle names OTLP when any source is OTLP.
     source = "otlp" if any(src.type == "otlp" for src in config.sources) else "bedrock"
     fmt, show_samples = config.format, config.show_samples
 
@@ -192,7 +192,7 @@ def _write_reports(assessments, config):
         generate_html_report(assessments, f"{output}.html", show_samples=show_samples, source=source)
         written.append(".html")
     if fmt in ("md", "both", "all"):
-        generate_report(assessments, f"{output}.md", show_samples=show_samples, source=source)
+        generate_report(assessments, f"{output}.md", show_samples=show_samples)
         written.append(".md")
     if fmt in ("json", "all"):
         generate_json_report(assessments, f"{output}.json", meta=run_meta, show_samples=show_samples)

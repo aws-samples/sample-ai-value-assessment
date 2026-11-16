@@ -39,7 +39,7 @@ _SESSION_ID_KEYS = ("session_id", "sessionId", "conversation_id", "conversationI
 _LIGHT_COLUMNS = (
     "id", "timestamp", "model", "input_tokens", "output_tokens",
     "cache_read_tokens", "cache_write_tokens", "estimated_cost_usd",
-    "cost_priced", "caller", "operation", "request_id", "max_tokens",
+    "caller", "operation", "request_id", "max_tokens",
     "session_key", "is_audit_overhead",
 )
 # Must list the exact same columns, in the exact same order, as the SELECT in
@@ -71,7 +71,6 @@ class AuditStore:
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_write_tokens INTEGER NOT NULL DEFAULT 0,
                 estimated_cost_usd REAL NOT NULL DEFAULT 0,
-                cost_priced INTEGER NOT NULL DEFAULT 0,
                 caller TEXT,
                 operation TEXT,
                 request_id TEXT,
@@ -106,9 +105,9 @@ class AuditStore:
         conn.executemany(
             "INSERT OR IGNORE INTO invocations (s3_key, last_modified, timestamp, model, "
             "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "
-            "estimated_cost_usd, cost_priced, caller, operation, request_id, max_tokens, "
+            "estimated_cost_usd, caller, operation, request_id, max_tokens, "
             "session_key, is_audit_overhead, payload) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         conn.commit()
@@ -128,7 +127,7 @@ class AuditStore:
         cur = conn.execute(
             "SELECT id, timestamp, model, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, estimated_cost_usd, "
-            "cost_priced, caller, operation, request_id, max_tokens, "
+            "caller, operation, request_id, max_tokens, "
             "session_key, is_audit_overhead FROM invocations "
             "WHERE is_audit_overhead = 0 ORDER BY id ASC"
         )
@@ -156,7 +155,7 @@ class AuditStore:
         conn = self._connect()
         cur = conn.execute(
             "SELECT id, timestamp, model, input_tokens, output_tokens, cache_read_tokens, "
-            "cache_write_tokens, estimated_cost_usd, cost_priced, caller, operation, "
+            "cache_write_tokens, estimated_cost_usd, caller, operation, "
             "request_id, max_tokens, payload FROM invocations "
             "WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id ASC",
             (json.dumps(list(ids)),),
@@ -215,7 +214,6 @@ def _to_row(record, s3_key, last_modified):
         record.cache_read_tokens,
         record.cache_write_tokens,
         record.estimated_cost_usd,
-        1 if record.cost_priced else 0,
         record.caller,
         record.operation,
         record.request_id,
@@ -228,7 +226,7 @@ def _to_row(record, s3_key, last_modified):
 
 def _from_row(row):
     (rid, timestamp, model, input_tokens, output_tokens, cache_read_tokens,
-     cache_write_tokens, estimated_cost_usd, cost_priced, caller, operation,
+     cache_write_tokens, estimated_cost_usd, caller, operation,
      request_id, max_tokens, payload_json) = row
     payload = json.loads(payload_json)
     return {
@@ -240,7 +238,6 @@ def _from_row(row):
         "cache_read_tokens": cache_read_tokens,
         "cache_write_tokens": cache_write_tokens,
         "estimated_cost_usd": estimated_cost_usd,
-        "cost_priced": bool(cost_priced),
         "caller": caller,
         "operation": operation,
         "request_id": request_id,
