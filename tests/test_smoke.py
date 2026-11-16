@@ -11,12 +11,9 @@ from aiva.pricing import estimate_cost
 from aiva.cli import _group_into_sessions
 from aiva.classifier import _apply_verdict_rubric, project_monthly_cost, cap_use_cases, _build_cluster
 from aiva.html_reporter import _use_case_id, generate_html_report
-from aiva.otlp_reader import (
-    _normalise_log_record, _normalise_span_record,
-    _extract_resource_attrs, _nano_to_iso,
-)
+from aiva.otlp_reader import _attrs, _nano_to_iso, parse as parse_otlp
 from aiva.reporter import generate_report, generate_json_report
-from aiva.invocation import Invocation
+from aiva.invocation import Attachment, Invocation
 from aiva.store import AuditStore
 
 
@@ -404,14 +401,32 @@ def _otlp_resource_attrs(service_name="claude-code", enduser_id="user@example.co
     return {"resource": {"attributes": attrs}}
 
 
+def _resource(resource_attrs):
+    return {"attributes": [_otlp_attr(k, v) for k, v in resource_attrs.items()]}
+
+
+def _parse_log(log_attrs, resource_attrs):
+    """The one record parse() makes from a single log record, or None."""
+    doc = {"resourceLogs": [{"resource": _resource(resource_attrs),
+                             "scopeLogs": [{"logRecords": [_otlp_log_record(attrs=log_attrs)]}]}]}
+    records = parse_otlp(doc, None)
+    return records[0] if records else None
+
+
+def _parse_span(span, resource_attrs):
+    doc = {"resourceSpans": [{"resource": _resource(resource_attrs), "scopeSpans": [{"spans": [span]}]}]}
+    records = parse_otlp(doc, None)
+    return records[0] if records else None
+
+
 def test_otlp_extract_resource_attrs():
     entry = _otlp_resource_attrs(service_name="my-agent", enduser_id="alice")
-    attrs = _extract_resource_attrs(entry)
+    attrs = _attrs(entry["resource"])
     assert attrs["service.name"] == "my-agent"
     assert attrs["enduser.id"] == "alice"
 
 
-def test_otlp_normalise_log_record_with_token_counts():
+def test_otlp_log_record_with_token_counts():
     log_attrs = [
         _otlp_attr("event.name", "claude_code.api_request"),
         _otlp_attr("gen_ai.request.model", "claude-sonnet-4-6"),
@@ -421,9 +436,7 @@ def test_otlp_normalise_log_record_with_token_counts():
     ]
     resource_attrs = {"enduser.id": "test-user", "service.name": "claude-code"}
 
-    record = _normalise_log_record(
-        _otlp_log_record(attrs=log_attrs), resource_attrs
-    )
+    record = _parse_log(log_attrs, resource_attrs)
 
     assert record is not None
     assert record.model == "claude-sonnet-4-6"
@@ -434,7 +447,7 @@ def test_otlp_normalise_log_record_with_token_counts():
     assert record.metadata["source_format"] == "otlp"
 
 
-def test_otlp_normalise_log_record_unknown_caller_when_no_enduser():
+def test_otlp_log_record_unknown_caller_when_no_enduser():
     log_attrs = [
         _otlp_attr("event.name", "claude_code.api_request"),
         _otlp_attr("gen_ai.request.model", "claude-haiku-3-5"),
@@ -442,47 +455,38 @@ def test_otlp_normalise_log_record_unknown_caller_when_no_enduser():
     ]
     resource_attrs = {"service.name": "claude-code"}
 
-    record = _normalise_log_record(
-        _otlp_log_record(attrs=log_attrs), resource_attrs
-    )
+    record = _parse_log(log_attrs, resource_attrs)
 
     assert record is not None
     assert record.caller == "unknown"
 
 
-def test_otlp_normalise_log_record_filters_irrelevant_events():
+def test_otlp_log_record_filters_irrelevant_events():
     log_attrs = [
         _otlp_attr("event.name", "http.client.request"),
     ]
     resource_attrs = {"service.name": "some-service"}
 
-    record = _normalise_log_record(
-        _otlp_log_record(attrs=log_attrs), resource_attrs
-    )
+    record = _parse_log(log_attrs, resource_attrs)
 
     assert record is None
 
 
-def test_otlp_normalise_log_record_captures_prompt_content():
+def test_otlp_user_prompt_is_context_not_an_invocation():
     log_attrs = [
         _otlp_attr("event.name", "claude_code.user_prompt"),
-        _otlp_attr("gen_ai.request.model", "claude-sonnet-4-6"),
-        _otlp_attr("gen_ai.prompt", "Explain how S3 bucket policies work"),
-        _otlp_attr("gen_ai.completion", "S3 bucket policies are JSON documents..."),
+        _otlp_attr("prompt.id", "p-1"),
+        _otlp_attr("prompt", "Explain how S3 bucket policies work"),
     ]
     resource_attrs = {"enduser.id": "dev-1", "service.name": "claude-code"}
 
-    record = _normalise_log_record(
-        _otlp_log_record(attrs=log_attrs), resource_attrs
-    )
+    record = _parse_log(log_attrs, resource_attrs)
 
-    assert record is not None
-    assert len(record.messages) == 1
-    assert record.messages[0]["content"] == "Explain how S3 bucket policies work"
-    assert "S3 bucket policies" in record.response_text
+    assert isinstance(record, Attachment)
+    assert (record.prompt_id, record.kind, record.text) == ("p-1", "prompt", "Explain how S3 bucket policies work")
 
 
-def test_otlp_normalise_span_record():
+def test_otlp_span_record():
     span = {
         "name": "claude_code.llm_request",
         "startTimeUnixNano": "1700000000000000000",
@@ -496,7 +500,7 @@ def test_otlp_normalise_span_record():
     }
     resource_attrs = {"enduser.id": "span-user", "service.name": "claude-code"}
 
-    record = _normalise_span_record(span, resource_attrs)
+    record = _parse_span(span, resource_attrs)
 
     assert record is not None
     assert record.model == "claude-opus-4-6"
@@ -511,7 +515,7 @@ def test_otlp_nano_to_iso():
     assert _nano_to_iso(None) == ""
 
 
-def test_otlp_normalised_records_insert_into_store(tmp_path):
+def test_otlp_records_insert_into_store(tmp_path):
     """OTLP records go through the same store path as Bedrock records."""
     log_attrs = [
         _otlp_attr("event.name", "claude_code.api_request"),
@@ -522,9 +526,7 @@ def test_otlp_normalised_records_insert_into_store(tmp_path):
     ]
     resource_attrs = {"enduser.id": "otlp-user", "service.name": "claude-code"}
 
-    record = _normalise_log_record(
-        _otlp_log_record(attrs=log_attrs), resource_attrs
-    )
+    record = _parse_log(log_attrs, resource_attrs)
 
     store = AuditStore(str(tmp_path / "audit.db"))
     store.insert_invocations([(record, "s3://bucket/otlp/file1.json", "2026-01-01T00:00:00Z")])
@@ -693,3 +695,18 @@ def test_preflight_ping_is_tagged_as_audit_overhead():
     with mock.patch("boto3.client", return_value=bedrock):
         _check_model_access([], "ap-southeast-2", "global.anthropic.claude-sonnet-4-6")
     assert bedrock.converse.call_args.kwargs["requestMetadata"] == {"source": "aiva-audit"}
+
+
+def test_otlp_claude_code_owns_its_events_even_when_they_look_like_calls():
+    # subagent_completed carries a model and tokens, but it is a summary, not a call.
+    log_attrs = [_otlp_attr("event.name", "subagent_completed"), _otlp_attr("model", "claude-opus-4-6"),
+                 _otlp_attr("input_tokens", 500, vtype="intValue")]
+    assert _parse_log(log_attrs, {"service.name": "claude-code"}) is None
+
+
+def test_otlp_genai_event_uses_body_as_the_prompt():
+    log_attrs = [_otlp_attr("event.name", "gen_ai.user.message"), _otlp_attr("gen_ai.request.model", "m")]
+    doc = {"resourceLogs": [{"resource": _resource({"service.name": "my-agent"}), "scopeLogs": [{"logRecords": [
+        _otlp_log_record(attrs=log_attrs, body_text="summarise the quarterly report")]}]}]}
+    (record,) = parse_otlp(doc, None)
+    assert record.messages == [{"role": "user", "content": "summarise the quarterly report"}]

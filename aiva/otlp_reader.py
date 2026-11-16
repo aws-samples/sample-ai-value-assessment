@@ -1,5 +1,11 @@
-"""Read OpenTelemetry (OTLP-JSON) log exports from S3 and normalise into
-Invocations. S3, threads and the store live in aiva.ingest.
+"""Read OpenTelemetry (OTLP-JSON) exports from S3. S3, threads and the store
+live in aiva.ingest.
+
+This is the transport layer only. It decodes OTLP JSON into OtelEvents and
+hands each one to the first dialect in aiva.dialects that recognises it.
+Which events are model calls, which carry context and which attributes hold
+the model and tokens is the dialect's job, so product-specific rules never
+live here.
 
 The OTEL Collector's awss3 exporter (marshaler: otlp_json) writes files
 containing the standard OTLP JSON structure: a top-level object with
@@ -7,17 +13,26 @@ containing the standard OTLP JSON structure: a top-level object with
 resource entry carries resource-level attributes (service.name, enduser.id)
 and scope-level records with per-event attributes.
 
-This reader handles log events (resourceLogs). Trace spans (resourceSpans)
-are supported as a secondary signal source when log events are not available.
-
-Cost is estimated from token counts in aiva.ingest, the same way as for
-Bedrock logs. A source-reported cost_usd is ignored.
+Log events (resourceLogs) are the main signal. Trace spans (resourceSpans)
+are read only when a document has no log records.
 """
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from aiva.dialects import DIALECTS
 from aiva.ingest import Source, s3_key_prefix
-from aiva.invocation import Invocation, as_int
+
+
+@dataclass(frozen=True)
+class OtelEvent:
+    """One decoded log record or span, before any dialect reads it."""
+    name: str               # event.name for a log record, the span name for a span
+    attrs: dict = field(default_factory=dict)
+    resource_attrs: dict = field(default_factory=dict)
+    timestamp: str = ""
+    body: str = ""
+    is_span: bool = False
 
 
 def log_prefix(prefix):
@@ -33,44 +48,59 @@ def wants_key(relative_key):
 
 
 def parse(raw, fetch_body):
-    """Convert one OTLP-JSON export document into Invocations.
-
-    One document may contain multiple resource entries, each with multiple
-    log records, so it can yield many Invocations.
-    """
+    """Convert one OTLP-JSON export document into Invocations and Attachments."""
     if not isinstance(raw, dict):
         return []
-
-    records = []
-
-    if "resourceLogs" in raw:
-        for resource_log in raw["resourceLogs"]:
-            resource_attrs = _extract_resource_attrs(resource_log)
-            for scope_log in resource_log.get("scopeLogs", []):
-                for log_record in scope_log.get("logRecords", []):
-                    record = _normalise_log_record(log_record, resource_attrs)
-                    if record:
-                        records.append(record)
-
+    records = [r for r in map(to_record, _log_events(raw)) if r]
     # Only fall back to spans when no log records were found, to avoid
     # double-counting the same LLM call reported as both a log and a span.
-    if not records and "resourceSpans" in raw:
-        for resource_span in raw["resourceSpans"]:
-            resource_attrs = _extract_resource_attrs(resource_span)
-            for scope_span in resource_span.get("scopeSpans", []):
-                for span in scope_span.get("spans", []):
-                    record = _normalise_span_record(span, resource_attrs)
-                    if record:
-                        records.append(record)
-
+    if not records:
+        records = [r for r in map(to_record, _span_events(raw)) if r]
     return records
 
 
-def _extract_resource_attrs(resource_entry):
-    """Extract resource-level attributes into a flat dict."""
+def to_record(event):
+    """The first matching dialect's Invocation or Attachment, or None."""
+    for dialect in DIALECTS:
+        if dialect.matches(event):
+            return dialect.to_record(event)
+    return None
+
+
+def _log_events(raw):
+    for resource_log in raw.get("resourceLogs", []):
+        resource_attrs = _attrs(resource_log.get("resource", {}))
+        for scope_log in resource_log.get("scopeLogs", []):
+            for record in scope_log.get("logRecords", []):
+                attrs = _attrs(record)
+                body = record.get("body", {})
+                yield OtelEvent(
+                    name=attrs.get("event.name", attrs.get("name", "")),
+                    attrs=attrs,
+                    resource_attrs=resource_attrs,
+                    timestamp=_nano_to_iso(record.get("timeUnixNano", record.get("observedTimeUnixNano", 0))),
+                    body=body.get("stringValue", "") if isinstance(body, dict) else body if isinstance(body, str) else "",
+                )
+
+
+def _span_events(raw):
+    for resource_span in raw.get("resourceSpans", []):
+        resource_attrs = _attrs(resource_span.get("resource", {}))
+        for scope_span in resource_span.get("scopeSpans", []):
+            for span in scope_span.get("spans", []):
+                yield OtelEvent(
+                    name=span.get("name", ""),
+                    attrs=_attrs(span),
+                    resource_attrs=resource_attrs,
+                    timestamp=_nano_to_iso(span.get("startTimeUnixNano", 0)),
+                    is_span=True,
+                )
+
+
+def _attrs(entry):
+    """An OTLP `attributes` list as a flat dict."""
     attrs = {}
-    resource = resource_entry.get("resource", {})
-    for attr in resource.get("attributes", []):
+    for attr in entry.get("attributes", []):
         key = attr.get("key", "")
         value = _extract_attr_value(attr.get("value", {}))
         if key and value is not None:
@@ -90,221 +120,6 @@ def _extract_attr_value(value_obj):
     return None
 
 
-def _extract_log_attrs(log_record):
-    """Extract log-record-level attributes into a flat dict."""
-    attrs = {}
-    for attr in log_record.get("attributes", []):
-        key = attr.get("key", "")
-        value = _extract_attr_value(attr.get("value", {}))
-        if key and value is not None:
-            attrs[key] = value
-    return attrs
-
-
-def _normalise_log_record(log_record, resource_attrs):
-    """Convert an OTLP log record into our internal invocation format."""
-    attrs = _extract_log_attrs(log_record)
-
-    event_name = attrs.get("event.name", attrs.get("name", ""))
-    if not _is_relevant_event(event_name, attrs):
-        return None
-
-    time_nano = log_record.get("timeUnixNano", log_record.get("observedTimeUnixNano", 0))
-    timestamp = _nano_to_iso(time_nano)
-
-    model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _extract_model_and_tokens(attrs, resource_attrs)
-    caller = _extract_caller(attrs, resource_attrs)
-    session_key = (attrs.get("session.id")
-                   or resource_attrs.get("session.id")
-                   or "")
-
-    body = log_record.get("body", {})
-    body_text = ""
-    if isinstance(body, dict):
-        body_text = body.get("stringValue", "")
-    elif isinstance(body, str):
-        body_text = body
-
-    system_prompt = attrs.get("gen_ai.system_prompt", "")
-    user_prompt = attrs.get("prompt", attrs.get("gen_ai.prompt", ""))
-    response_text = attrs.get("response", attrs.get("gen_ai.completion", ""))
-
-    tools = _extract_list_attr(attrs, "tools")
-
-    messages = []
-    if user_prompt:
-        messages.append({"role": "user", "content": user_prompt})
-    if not messages and body_text:
-        messages.append({"role": "user", "content": body_text})
-
-    service_name = resource_attrs.get("service.name", "")
-
-    return Invocation(
-        timestamp=timestamp,
-        model=model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_write_tokens=cache_write_tokens,
-        system_prompt=system_prompt,
-        tools=tools,
-        messages=messages,
-        response_text=response_text,
-        max_tokens=attrs.get("gen_ai.request.max_tokens"),
-        caller=caller,
-        user_agent=service_name,
-        operation=event_name or "otlp_log",
-        request_id=attrs.get("request_id", attrs.get("gen_ai.request.id", "")),
-        metadata=_build_metadata(attrs, resource_attrs, session_key),
-    )
-
-
-def _normalise_span_record(span, resource_attrs):
-    """Convert an OTLP trace span into our internal invocation format.
-
-    Spans carry structured timing and nesting but the same attribute
-    conventions as log records for gen_ai.* fields.
-    """
-    attrs = {}
-    for attr in span.get("attributes", []):
-        key = attr.get("key", "")
-        value = _extract_attr_value(attr.get("value", {}))
-        if key and value is not None:
-            attrs[key] = value
-
-    span_name = span.get("name", "")
-    if not _is_relevant_span(span_name, attrs):
-        return None
-
-    time_nano = span.get("startTimeUnixNano", 0)
-    timestamp = _nano_to_iso(time_nano)
-
-    model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _extract_model_and_tokens(attrs, resource_attrs)
-    caller = _extract_caller(attrs, resource_attrs)
-    session_key = (attrs.get("session.id")
-                   or resource_attrs.get("session.id")
-                   or "")
-
-    system_prompt = attrs.get("gen_ai.system_prompt", "")
-    user_prompt = attrs.get("prompt", attrs.get("gen_ai.prompt", ""))
-    response_text = attrs.get("response", attrs.get("gen_ai.completion", ""))
-
-    tools = _extract_list_attr(attrs, "tools")
-
-    messages = []
-    if user_prompt:
-        messages.append({"role": "user", "content": user_prompt})
-
-    service_name = resource_attrs.get("service.name", "")
-
-    return Invocation(
-        timestamp=timestamp,
-        model=model,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_write_tokens=cache_write_tokens,
-        system_prompt=system_prompt,
-        tools=tools,
-        messages=messages,
-        response_text=response_text,
-        max_tokens=attrs.get("gen_ai.request.max_tokens"),
-        caller=caller,
-        user_agent=service_name,
-        operation=span_name or "otlp_span",
-        request_id=attrs.get("request_id", attrs.get("gen_ai.request.id", "")),
-        metadata=_build_metadata(attrs, resource_attrs, session_key),
-    )
-
-
-def _extract_model_and_tokens(attrs, resource_attrs):
-    """Extract model ID and token counts from attributes, checking both
-    Claude Code's native names and gen_ai.* convention names."""
-    model = (attrs.get("model")
-             or attrs.get("gen_ai.request.model")
-             or attrs.get("gen_ai.response.model")
-             or resource_attrs.get("gen_ai.request.model")
-             or "unknown")
-    input_tokens = as_int(attrs.get("input_tokens",
-                                      attrs.get("gen_ai.usage.input_tokens", 0)))
-    output_tokens = as_int(attrs.get("output_tokens",
-                                       attrs.get("gen_ai.usage.output_tokens", 0)))
-    cache_read_tokens = as_int(attrs.get("cache_read_tokens",
-                                           attrs.get("gen_ai.usage.cache_read_input_tokens", 0)))
-    cache_write_tokens = as_int(attrs.get("cache_creation_tokens",
-                                            attrs.get("gen_ai.usage.cache_creation_input_tokens", 0)))
-    return model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
-
-
-def _extract_caller(attrs, resource_attrs):
-    """Extract caller identity, checking Claude Code's user.email first."""
-    return (attrs.get("user.email")
-            or attrs.get("user.id")
-            or resource_attrs.get("enduser.id")
-            or resource_attrs.get("user.email")
-            or "unknown")
-
-
-def _build_metadata(attrs, resource_attrs, session_key):
-    """Build the metadata dict that store.py uses for session_key extraction."""
-    metadata = {}
-    if session_key:
-        metadata["session_id"] = session_key
-    metadata["source_format"] = "otlp"
-    metadata["service_name"] = resource_attrs.get("service.name", "")
-    if resource_attrs.get("service.version"):
-        metadata["service_version"] = resource_attrs["service.version"]
-    if attrs.get("deployment.environment"):
-        metadata["environment"] = attrs["deployment.environment"]
-    if resource_attrs.get("deployment.environment"):
-        metadata["environment"] = resource_attrs["deployment.environment"]
-    return metadata
-
-
-def _is_relevant_event(event_name, attrs):
-    """Filter to events that represent LLM invocations or tool calls worth classifying."""
-    relevant_names = (
-        "api_request", "user_prompt", "assistant_response", "tool_result",
-        "tool_decision", "api_error",
-        "claude_code.user_prompt", "claude_code.tool_result",
-        "claude_code.api_request", "claude_code.api_error",
-    )
-    relevant_prefixes = (
-        "claude_code.", "gen_ai.", "llm.",
-    )
-
-    if event_name in relevant_names:
-        return True
-    if any(event_name.startswith(p) for p in relevant_prefixes):
-        return True
-
-    if attrs.get("gen_ai.usage.input_tokens") or attrs.get("gen_ai.request.model"):
-        return True
-    if attrs.get("input_tokens") and attrs.get("model"):
-        return True
-
-    return False
-
-
-def _is_relevant_span(span_name, attrs):
-    """Filter to spans that represent LLM calls or meaningful tool invocations."""
-    relevant_names = (
-        "api_request", "user_prompt", "assistant_response", "tool_result",
-    )
-    relevant_prefixes = (
-        "claude_code.", "gen_ai.", "llm.",
-    )
-    if span_name in relevant_names:
-        return True
-    if any(span_name.startswith(p) for p in relevant_prefixes):
-        return True
-    if attrs.get("gen_ai.usage.input_tokens") or attrs.get("gen_ai.request.model"):
-        return True
-    if attrs.get("input_tokens") and attrs.get("model"):
-        return True
-    return False
-
-
 def _nano_to_iso(nano):
     """Convert nanosecond Unix timestamp to ISO-8601 string."""
     if not nano:
@@ -314,16 +129,6 @@ def _nano_to_iso(nano):
         return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
     except (ValueError, OSError):
         return ""
-
-
-def _extract_list_attr(attrs, key):
-    """Extract a list-valued attribute, or return empty list."""
-    val = attrs.get(key, [])
-    if isinstance(val, list):
-        return val
-    if isinstance(val, str) and val:
-        return [val]
-    return []
 
 
 SOURCE = Source(

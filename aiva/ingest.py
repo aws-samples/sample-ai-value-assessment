@@ -16,6 +16,7 @@ from typing import Callable
 
 from botocore.exceptions import ClientError
 
+from aiva.invocation import Invocation
 from aiva.pricing import DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M, estimate_cost
 
 INSERT_BATCH_SIZE = 500  # bounds how many full payloads are ever resident at once
@@ -36,7 +37,7 @@ class Source:
     log_prefix: Callable     # (prefix) -> key prefix the logs live under
     list_prefixes: Callable  # (s3, bucket, log_prefix, from_date) -> prefixes to list
     wants_key: Callable      # (key relative to log_prefix) -> bool
-    parse: Callable          # (json document, fetch_body) -> Invocations
+    parse: Callable          # (json document, fetch_body) -> Invocations and Attachments
 
 
 @dataclass
@@ -102,16 +103,17 @@ def read_to_store(store, src, from_date, to_date=None, session=None,
     buffer = []
     max_workers = min(32, max(4, len(wanted)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for (invocations, skipped), key, lm in pool.map(_fetch, wanted):
+        for (records, skipped), key, lm in pool.map(_fetch, wanted):
             result.skipped += skipped
             lm_iso = lm.astimezone(timezone.utc).isoformat()
-            # One object can hold several invocations. The first keeps the
+            # One object can hold several records. The first keeps the
             # bare key, which is what stored_keys() checks on a resume.
-            for i, invocation in enumerate(invocations):
-                invocation.estimated_cost_usd = estimate_cost(
-                    invocation.input_tokens, invocation.output_tokens, invocation.cache_read_tokens,
-                    invocation.cache_write_tokens, *rates)
-                buffer.append((invocation, key if i == 0 else f"{key}#{i}", lm_iso))
+            for i, record in enumerate(records):
+                if isinstance(record, Invocation):
+                    record.estimated_cost_usd = estimate_cost(
+                        record.input_tokens, record.output_tokens, record.cache_read_tokens,
+                        record.cache_write_tokens, *rates)
+                buffer.append((record, key if i == 0 else f"{key}#{i}", lm_iso))
             # Flush only between objects, so an object is never half committed.
             if len(buffer) >= INSERT_BATCH_SIZE:
                 store.insert_invocations(buffer)

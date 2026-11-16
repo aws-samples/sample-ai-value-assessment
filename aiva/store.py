@@ -29,6 +29,8 @@ import json
 import sqlite3
 import threading
 
+from aiva.invocation import Attachment
+
 # requestMetadata keys that carry an explicit session/conversation identifier.
 # Checked in order; first present wins. Moved here (from cli.py) because
 # session_key is now computed once, at insert time, not re-derived from raw
@@ -80,6 +82,20 @@ class AuditStore:
                 payload TEXT NOT NULL
             )
         """)
+        # Attachments (aiva/invocation.py) are stored as-is. How they join
+        # onto invocations lives in aiva/attachments.py, not here.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                s3_key TEXT UNIQUE,
+                prompt_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                request_id TEXT,
+                timestamp TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_prompt ON attachments(prompt_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_session_key ON invocations(session_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_overhead ON invocations(is_audit_overhead)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_last_modified ON invocations(last_modified)")
@@ -92,7 +108,8 @@ class AuditStore:
 
     def insert_invocations(self, items):
         """Insert a batch of (record, s3_key, last_modified_iso) tuples in one
-        transaction. `record` is an aiva.invocation.Invocation. Call from
+        transaction. `record` is an aiva.invocation.Invocation or
+        Attachment. Call from
         a single thread only, the S3 fetch's worker threads run concurrently
         but the caller collects their results and inserts on the main thread,
         avoiding concurrent SQLite writers entirely.
@@ -101,7 +118,15 @@ class AuditStore:
         present is a silent no-op, not a duplicate row and not an error.
         """
         conn = self._connect()
-        rows = [_to_row(record, s3_key, last_modified) for record, s3_key, last_modified in items]
+        attachments = [(s3_key, a.prompt_id, a.kind, a.text, a.request_id, a.timestamp)
+                       for a, s3_key, _ in items if isinstance(a, Attachment)]
+        rows = [_to_row(record, s3_key, last_modified) for record, s3_key, last_modified in items
+                if not isinstance(record, Attachment)]
+        conn.executemany(
+            "INSERT OR IGNORE INTO attachments (s3_key, prompt_id, kind, text, request_id, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            attachments,
+        )
         conn.executemany(
             "INSERT OR IGNORE INTO invocations (s3_key, last_modified, timestamp, model, "
             "input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "
@@ -117,7 +142,9 @@ class AuditStore:
         keeps the bare key (later ones get "#i"), and an object's records are
         always committed together, so a bare key means the whole object is in."""
         conn = self._connect()
-        return {row[0] for row in conn.execute("SELECT s3_key FROM invocations WHERE s3_key NOT LIKE '%#%'")}
+        return {row[0] for row in conn.execute(
+            "SELECT s3_key FROM invocations WHERE s3_key NOT LIKE '%#%' "
+            "UNION SELECT s3_key FROM attachments WHERE s3_key NOT LIKE '%#%'")}
 
     def fetch_light_rows(self):
         """Return all non-audit-overhead rows with only the light (session
@@ -161,6 +188,18 @@ class AuditStore:
             (json.dumps(list(ids)),),
         )
         return [_from_row(row) for row in cur.fetchall()]
+
+    def fetch_attachments(self, prompt_ids):
+        """Attachments for the given prompt ids, oldest first."""
+        if not prompt_ids:
+            return []
+        conn = self._connect()
+        cur = conn.execute(
+            "SELECT prompt_id, kind, text, request_id, timestamp FROM attachments "
+            "WHERE prompt_id IN (SELECT value FROM json_each(?)) ORDER BY timestamp, id",
+            (json.dumps(list(prompt_ids)),),
+        )
+        return [Attachment(*row) for row in cur.fetchall()]
 
     def overhead_summary(self):
         """Return (count, total_cost_usd) for AI Value Assessment's own audit-overhead calls."""
@@ -249,3 +288,4 @@ def _from_row(row):
         "user_agent": payload.get("user_agent", ""),
         "metadata": payload.get("metadata", {}),
     }
+

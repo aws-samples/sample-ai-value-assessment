@@ -13,6 +13,7 @@ from botocore.exceptions import ClientError
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from fake_s3 import FakeS3  # noqa: E402
 
+from aiva.attachments import load_invocations  # noqa: E402
 from aiva.config import SourceConfig  # noqa: E402
 from aiva.ingest import read_to_store  # noqa: E402
 from aiva.invocation import Invocation  # noqa: E402
@@ -112,6 +113,62 @@ def test_otlp_reads_one_export_per_line(tmp_path):
         json.dumps(_otlp_export("claude-sonnet-4-6")) + "\n" + json.dumps(_otlp_export("claude-opus-4-6")) + "\n")
     _, rows = _read(tmp_path, root, source="otlp", prefix="otel")
     assert sorted(r["model"] for r in rows) == ["claude-opus-4-6", "claude-sonnet-4-6"]
+
+
+def _otlp_event(name, **attrs):
+    """One Claude Code / Cowork log record, shaped as in the monitoring docs."""
+    attrs = {"event.name": name, "session.id": "s-1", "user.id": "u-1", **attrs}
+    return {"timeUnixNano": "1762916400000000000", "body": {"stringValue": f"claude_code.{name}"},
+            "attributes": [{"key": k, "value": {"stringValue": str(v)}} for k, v in attrs.items()]}
+
+
+def _otlp_logs(*events, service="claude-code"):
+    return {"resourceLogs": [{"resource": {"attributes": [{"key": "service.name", "value": {"stringValue": service}}]},
+                              "scopeLogs": [{"logRecords": list(events)}]}]}
+
+
+def test_otlp_one_invocation_per_call_with_context_from_other_objects(tmp_path):
+    # The collector batches by time, so a prompt and its calls can land in different objects.
+    root = tmp_path / "s3"
+    (root / "otel").mkdir(parents=True)
+    (root / "otel" / "20261112T030000Z_a.json").write_text(json.dumps(_otlp_logs(
+        _otlp_event("user_prompt", **{"prompt.id": "p-1", "prompt": "fix the failing test in billing"}),
+        _otlp_event("hook_execution_start", **{"prompt.id": "p-1", "hook_name": "pre"}),
+        _otlp_event("plugin_loaded", **{"plugin.name": "x"}))))
+    (root / "otel" / "20261112T030100Z_b.json").write_text(json.dumps(_otlp_logs(
+        _otlp_event("api_request", **{"prompt.id": "p-1", "model": "claude-sonnet-4-6", "request_id": "r-1",
+                                      "input_tokens": "100", "output_tokens": "20", "cache_read_tokens": "5000"}),
+        _otlp_event("tool_decision", **{"prompt.id": "p-1", "tool_name": "Bash", "decision": "accept"}),
+        _otlp_event("tool_result", **{"prompt.id": "p-1", "tool_name": "Bash", "success": "true"}),
+        _otlp_event("api_request", **{"prompt.id": "p-1", "model": "claude-sonnet-4-6", "request_id": "r-2",
+                                      "input_tokens": "50", "output_tokens": "30"}),
+        _otlp_event("assistant_response", **{"prompt.id": "p-1", "request_id": "r-2", "model": "claude-sonnet-4-6",
+                                             "response": "fixed the rounding in the billing test"}))))
+    store = AuditStore(str(tmp_path / "a.db"))
+    read_to_store(store, _src("otlp", "otel"), FROM, session=FakeS3(root))
+    rows = store.fetch_light_rows()
+    assert [(r["request_id"], r["model"], r["session_key"]) for r in rows] == [
+        ("r-1", "claude-sonnet-4-6", "s-1"), ("r-2", "claude-sonnet-4-6", "s-1")]
+    first, second = load_invocations(store, [r["id"] for r in rows])
+    assert first["messages"] == [{"role": "user", "content": "fix the failing test in billing"}]
+    assert first["tools"] == ["Bash"]
+    assert (first["response_text"], second["response_text"]) == ("", "fixed the rounding in the billing test")
+    assert second["messages"] == [] and second["tools"] == []
+    # Context objects count as read, so a resume does not fetch them again.
+    assert {"otel/20261112T030000Z_a.json", "otel/20261112T030100Z_b.json"} <= store.stored_keys()
+    store.close()
+
+
+def test_otlp_cowork_call_without_prompt_context_still_counts(tmp_path):
+    root = tmp_path / "s3"
+    (root / "otel").mkdir(parents=True)
+    (root / "otel" / "20261112T030000Z_a.json").write_text(json.dumps(_otlp_logs(
+        _otlp_event("api_request", **{"prompt.id": "p-9", "model": "claude-opus-4-6", "input_tokens": "2",
+                                      "cache_creation_tokens": "36000"}),
+        _otlp_event("user_prompt", prompt_length="3"),  # prompt logging off, no text and no prompt.id
+        service="cowork")))
+    _, rows = _read(tmp_path, root, source="otlp", prefix="otel")
+    assert [(r["model"], r["cache_write_tokens"]) for r in rows] == [("claude-opus-4-6", 36000)]
 
 
 def test_invocation_coerces_types_once():
