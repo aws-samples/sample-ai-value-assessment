@@ -729,7 +729,7 @@ def _call_bedrock_json(bedrock, model_id, prompt, max_tokens=2000, tag=None):
         kwargs = {
             "modelId": model_id,
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "inferenceConfig": {"maxTokens": max_tokens, "temperature": 0},
+            "inferenceConfig": {"maxTokens": max_tokens},
         }
         if tag:
             kwargs["requestMetadata"] = {"source": tag}
