@@ -3,6 +3,8 @@ import hashlib
 import html as html_lib
 from datetime import datetime, timezone
 
+from aiva.pricing import DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M, cost_note
+
 # Static, no per-report interpolation (checked: contains no Python f-string
 # placeholders), so its content and CSP hash never change between reports.
 # Kept as a plain string, not an f-string, so brace characters are literal
@@ -394,7 +396,8 @@ def _use_case_id(a):
     return "uc_" + hashlib.sha256(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
-def generate_html_report(assessments, output_path, show_samples=False, source="bedrock"):
+def generate_html_report(assessments, output_path, show_samples=False, source="bedrock",
+                         rates=(DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M)):
     """Generate a use-case HTML dashboard: Business summary + Technical drill-down.
 
     Each assessment is a de-duplicated business USE CASE that may span several
@@ -448,7 +451,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
 
         <div class="summary-grid">
             <div class="card">
-                <div class="label">Total Spend</div>
+                <div class="label">Estimated Spend</div>
                 <div class="value">${total_cost:.2f}</div>
             </div>
             <div class="card">
@@ -477,7 +480,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
             </div>
         </div>
 
-        {'<div class="source-caveat">Data source: OpenTelemetry telemetry. Cost figures are estimated from token counts and published model pricing. They do not reflect negotiated rates, provisioned throughput, or batch discounts.</div>' if source == "otlp" else ""}
+        <div class="source-caveat">{_escape(cost_note(*rates))}</div>
         <div class="cost-bar-section">
             <h3>Cost by Recommendation</h3>
             {_render_cost_bar(stop_cost, refine_cost, expand_cost, total_cost)}

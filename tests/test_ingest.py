@@ -51,6 +51,15 @@ def _read(tmp_path, root, source="bedrock", prefix="", s3=None):
     return result, rows
 
 
+def test_cost_is_set_at_ingest_from_the_given_rates(tmp_path):
+    root = tmp_path / "s3"
+    _write(root, DAY.format(region="ap-southeast-2") + "20261112T030000Z_a.json.gz", [_record(1)])  # 10 in, 5 out
+    store = AuditStore(str(tmp_path / "a.db"))
+    read_to_store(store, _src(), FROM, session=FakeS3(root), rates=(1_000_000, 2_000_000))
+    assert store.fetch_light_rows()[0]["estimated_cost_usd"] == 10 * 1 + 5 * 2
+    store.close()
+
+
 def test_bad_object_and_bad_record_are_skipped_not_fatal(tmp_path):
     root = tmp_path / "s3"
     _write(root, DAY.format(region="ap-southeast-2") + "20261112T030000Z_a.json.gz", raw=b'{"not": "gzip"}')
