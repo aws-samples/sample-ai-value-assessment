@@ -10,6 +10,12 @@ and scope-level records with per-event attributes.
 This reader handles log events (resourceLogs). Trace spans (resourceSpans)
 are supported as a secondary signal source when log events are not available.
 
+Claude Code and Cowork send one event per step of a prompt (user_prompt,
+api_request, tool_decision, tool_result, assistant_response, hooks...). Only
+api_request and api_error are model calls, so only they become Invocations.
+The prompt text, response text and tool names become PromptContext, which the
+store attaches to the calls by prompt.id. Everything else is dropped.
+
 Cost is estimated from token counts in aiva.ingest, the same way as for
 Bedrock logs. A source-reported cost_usd is ignored.
 """
@@ -17,7 +23,11 @@ Bedrock logs. A source-reported cost_usd is ignored.
 from datetime import datetime, timezone
 
 from aiva.ingest import Source, s3_key_prefix
-from aiva.invocation import Invocation, as_int
+from aiva.invocation import Invocation, PromptContext, as_int
+
+_CALL_EVENTS = {"api_request", "api_error"}
+_CONTEXT_EVENTS = {"user_prompt": "prompt", "assistant_response": "response",
+                   "tool_decision": "tool", "tool_result": "tool"}
 
 
 def log_prefix(prefix):
@@ -33,10 +43,10 @@ def wants_key(relative_key):
 
 
 def parse(raw, fetch_body):
-    """Convert one OTLP-JSON export document into Invocations.
+    """Convert one OTLP-JSON export document into Invocations and PromptContext.
 
     One document may contain multiple resource entries, each with multiple
-    log records, so it can yield many Invocations.
+    log records, so it can yield many records.
     """
     if not isinstance(raw, dict):
         return []
@@ -102,15 +112,18 @@ def _extract_log_attrs(log_record):
 
 
 def _normalise_log_record(log_record, resource_attrs):
-    """Convert an OTLP log record into our internal invocation format."""
+    """Convert an OTLP log record into an Invocation, a PromptContext or None."""
     attrs = _extract_log_attrs(log_record)
 
     event_name = attrs.get("event.name", attrs.get("name", ""))
-    if not _is_relevant_event(event_name, attrs):
-        return None
-
+    event = event_name.removeprefix("claude_code.")
     time_nano = log_record.get("timeUnixNano", log_record.get("observedTimeUnixNano", 0))
     timestamp = _nano_to_iso(time_nano)
+
+    if event in _CONTEXT_EVENTS:
+        return _prompt_context(_CONTEXT_EVENTS[event], attrs, timestamp)
+    if not _is_call_event(event, attrs):
+        return None
 
     model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _extract_model_and_tokens(attrs, resource_attrs)
     caller = _extract_caller(attrs, resource_attrs)
@@ -134,7 +147,8 @@ def _normalise_log_record(log_record, resource_attrs):
     messages = []
     if user_prompt:
         messages.append({"role": "user", "content": user_prompt})
-    if not messages and body_text:
+    # Claude Code and Cowork set the body to the event name, which is not content.
+    if not messages and body_text and event not in _CALL_EVENTS:
         messages.append({"role": "user", "content": body_text})
 
     service_name = resource_attrs.get("service.name", "")
@@ -157,6 +171,17 @@ def _normalise_log_record(log_record, resource_attrs):
         request_id=attrs.get("request_id", attrs.get("gen_ai.request.id", "")),
         metadata=_build_metadata(attrs, resource_attrs, session_key),
     )
+
+
+def _prompt_context(kind, attrs, timestamp):
+    """PromptContext for a user_prompt, assistant_response or tool event, or
+    None when it has no prompt.id to join on or nothing to carry."""
+    prompt_id = attrs.get("prompt.id")
+    text = attrs.get({"prompt": "prompt", "response": "response", "tool": "tool_name"}[kind])
+    if not prompt_id or not text:
+        return None
+    return PromptContext(prompt_id=str(prompt_id), kind=kind, text=str(text),
+                         request_id=str(attrs.get("request_id", "")), timestamp=timestamp)
 
 
 def _normalise_span_record(span, resource_attrs):
@@ -252,6 +277,8 @@ def _build_metadata(attrs, resource_attrs, session_key):
         metadata["session_id"] = session_key
     metadata["source_format"] = "otlp"
     metadata["service_name"] = resource_attrs.get("service.name", "")
+    if attrs.get("prompt.id"):
+        metadata["prompt_id"] = str(attrs["prompt.id"])
     if resource_attrs.get("service.version"):
         metadata["service_version"] = resource_attrs["service.version"]
     if attrs.get("deployment.environment"):
@@ -261,38 +288,27 @@ def _build_metadata(attrs, resource_attrs, session_key):
     return metadata
 
 
-def _is_relevant_event(event_name, attrs):
-    """Filter to events that represent LLM invocations or tool calls worth classifying."""
-    relevant_names = (
-        "api_request", "user_prompt", "assistant_response", "tool_result",
-        "tool_decision", "api_error",
-        "claude_code.user_prompt", "claude_code.tool_result",
-        "claude_code.api_request", "claude_code.api_error",
-    )
-    relevant_prefixes = (
-        "claude_code.", "gen_ai.", "llm.",
-    )
-
-    if event_name in relevant_names:
+def _is_call_event(event, attrs):
+    """True for events that are model calls: Claude Code / Cowork api_request
+    and api_error, or GenAI-convention events that carry a model or tokens."""
+    if event in _CALL_EVENTS:
         return True
-    if any(event_name.startswith(p) for p in relevant_prefixes):
+    if event.startswith(("gen_ai.", "llm.")):
         return True
-
     if attrs.get("gen_ai.usage.input_tokens") or attrs.get("gen_ai.request.model"):
         return True
     if attrs.get("input_tokens") and attrs.get("model"):
         return True
-
     return False
 
 
 def _is_relevant_span(span_name, attrs):
-    """Filter to spans that represent LLM calls or meaningful tool invocations."""
+    """Filter to spans that represent model calls, not tool or interaction spans."""
     relevant_names = (
-        "api_request", "user_prompt", "assistant_response", "tool_result",
+        "api_request", "claude_code.llm_request",
     )
     relevant_prefixes = (
-        "claude_code.", "gen_ai.", "llm.",
+        "gen_ai.", "llm.",
     )
     if span_name in relevant_names:
         return True

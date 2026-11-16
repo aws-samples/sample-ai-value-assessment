@@ -48,3 +48,17 @@ def as_int(value):
         return int(value or 0)
     except (ValueError, TypeError):
         return 0
+
+
+@dataclass
+class PromptContext:
+    """What a user asked, what came back, or which tool ran, for one prompt.
+    Not a model call, so it is never counted or priced. The store attaches it
+    to the calls with the same prompt_id when a session is fetched, since a
+    prompt's events can land in different S3 objects."""
+
+    prompt_id: str
+    kind: str  # "prompt", "response" or "tool"
+    text: str = ""
+    request_id: str = ""  # set on responses, to match the exact call
+    timestamp: str = ""

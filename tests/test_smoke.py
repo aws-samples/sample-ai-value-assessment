@@ -16,7 +16,7 @@ from aiva.otlp_reader import (
     _extract_resource_attrs, _nano_to_iso,
 )
 from aiva.reporter import generate_report, generate_json_report
-from aiva.invocation import Invocation
+from aiva.invocation import Invocation, PromptContext
 from aiva.store import AuditStore
 
 
@@ -463,12 +463,11 @@ def test_otlp_normalise_log_record_filters_irrelevant_events():
     assert record is None
 
 
-def test_otlp_normalise_log_record_captures_prompt_content():
+def test_otlp_user_prompt_is_context_not_an_invocation():
     log_attrs = [
         _otlp_attr("event.name", "claude_code.user_prompt"),
-        _otlp_attr("gen_ai.request.model", "claude-sonnet-4-6"),
-        _otlp_attr("gen_ai.prompt", "Explain how S3 bucket policies work"),
-        _otlp_attr("gen_ai.completion", "S3 bucket policies are JSON documents..."),
+        _otlp_attr("prompt.id", "p-1"),
+        _otlp_attr("prompt", "Explain how S3 bucket policies work"),
     ]
     resource_attrs = {"enduser.id": "dev-1", "service.name": "claude-code"}
 
@@ -476,10 +475,8 @@ def test_otlp_normalise_log_record_captures_prompt_content():
         _otlp_log_record(attrs=log_attrs), resource_attrs
     )
 
-    assert record is not None
-    assert len(record.messages) == 1
-    assert record.messages[0]["content"] == "Explain how S3 bucket policies work"
-    assert "S3 bucket policies" in record.response_text
+    assert isinstance(record, PromptContext)
+    assert (record.prompt_id, record.kind, record.text) == ("p-1", "prompt", "Explain how S3 bucket policies work")
 
 
 def test_otlp_normalise_span_record():
