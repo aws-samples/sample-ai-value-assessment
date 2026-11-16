@@ -1,0 +1,9 @@
+.git
+.venv
+.claude
+out
+scratchpad
+tests
+build
+*.db
+report.*
