@@ -16,6 +16,8 @@ run with a message naming them.
 | `format` | no | `all` | `html`, `md`, `json`, `both` (html and md) or `all` |
 | `max_use_cases` | no | `50` | Use cases assessed one by one. The rest roll into "Other" |
 | `show_samples` | no | `false` | `true` adds raw prompt and response excerpts to the report |
+| `input_per_1m` | no | `3.0` | USD per 1M input tokens for the cost estimate, the same for every model. Cache reads cost 0.1x and cache writes 1.25x this rate |
+| `output_per_1m` | no | `15.0` | USD per 1M output tokens for the cost estimate |
 
 The window is based on when log objects were written, so calls in the last few
 minutes before `from` or `to` can fall on either side.

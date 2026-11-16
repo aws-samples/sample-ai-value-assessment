@@ -12,6 +12,7 @@ import boto3
 import botocore.session
 from botocore.credentials import RefreshableCredentials
 
+from aiva.pricing import DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M
 from aiva.sources import SOURCES
 
 DEFAULT_MODEL = "global.anthropic.claude-sonnet-4-6"
@@ -62,6 +63,12 @@ class RunConfig:
     format: str = "all"
     max_use_cases: int = 50
     show_samples: bool = False
+    input_per_1m: float = DEFAULT_INPUT_PER_1M   # USD per 1M input tokens, for the cost estimate
+    output_per_1m: float = DEFAULT_OUTPUT_PER_1M
+
+    @property
+    def rates(self):
+        return self.input_per_1m, self.output_per_1m
 
     def window(self):
         """(from_date, to_date, days): the read window and its length for monthly projections."""
@@ -70,7 +77,7 @@ class RunConfig:
 
 
 _RUN_KEYS = {"region", "from", "to", "model", "output", "format", "max_use_cases",
-             "show_samples", "sources"}
+             "show_samples", "input_per_1m", "output_per_1m", "sources"}
 _SOURCE_KEYS = {"type", "bucket", "prefix", "region", "profile", "role_arn"}
 
 
@@ -91,6 +98,10 @@ def load_config(path):
         raise ValueError(f"{path}: 'format' must be one of: {', '.join(FORMATS)}")
     if "from" not in raw:
         raise ValueError(f"{path}: 'from' is required, a date like 2026-10-01")
+    for rate in ("input_per_1m", "output_per_1m"):
+        value = raw.get(rate, 1)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"{path}: '{rate}' must be a positive number, USD per 1M tokens")
     if not raw.get("sources"):
         raise ValueError(f"{path}: add at least one [[sources]] entry")
 

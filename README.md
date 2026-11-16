@@ -157,11 +157,11 @@ The stack creates a CodeBuild project, an IAM role scoped to
 [`docs/iam-policy.json`](docs/iam-policy.json) plus write to the output bucket,
 and the destination S3 bucket (encrypted, public-access blocked, HTTPS-only).
 
-**Cost estimate note:** costs are a ballpark from token counts only, at
-Sonnet-class rates ($3 input, $15 output per 1M tokens) whatever the model.
-The report shows a range from Haiku-class ($1 / $5) to Opus-class ($5 / $25)
-rates. Negotiated rates, provisioned throughput and batch are not taken into
-account.
+**Cost estimate note:** costs are a ballpark from token counts only, at $3
+input and $15 output per 1M tokens whatever the model. Set `input_per_1m` and
+`output_per_1m` in the config to use your own rates. Negotiated rates,
+provisioned throughput and batch are not taken into account. Rates apply when
+logs are read, so after changing them start a fresh `--db`.
 
 ## Reading the report
 

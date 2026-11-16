@@ -16,6 +16,8 @@ from typing import Callable
 
 from botocore.exceptions import ClientError
 
+from aiva.pricing import DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M, estimate_cost
+
 INSERT_BATCH_SIZE = 500  # bounds how many full payloads are ever resident at once
 
 # Errors that mean the run cannot work at all, not that one object is bad.
@@ -52,7 +54,8 @@ def s3_key_prefix(prefix, *parts):
     return f"{joined}/" if joined else ""
 
 
-def read_to_store(store, src, from_date, to_date=None, session=None):
+def read_to_store(store, src, from_date, to_date=None, session=None,
+                  rates=(DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M)):
     """Read one configured source (config.SourceConfig) into `store`, for
     objects written from `from_date` up to `to_date` (UTC datetimes).
 
@@ -65,7 +68,8 @@ def read_to_store(store, src, from_date, to_date=None, session=None):
 
     One unreadable object or record is skipped and reported in the result;
     an access or credentials error stops the run. `session` overrides the
-    source's own credentials (tests pass a fake S3).
+    source's own credentials (tests pass a fake S3). `rates` is
+    (input, output) USD per 1M tokens for the cost estimate.
     """
     session = session or src.session()
     source = src.source
@@ -104,6 +108,9 @@ def read_to_store(store, src, from_date, to_date=None, session=None):
             # One object can hold several invocations. The first keeps the
             # bare key, which is what stored_keys() checks on a resume.
             for i, invocation in enumerate(invocations):
+                invocation.estimated_cost_usd = estimate_cost(
+                    invocation.input_tokens, invocation.output_tokens, invocation.cache_read_tokens,
+                    invocation.cache_write_tokens, *rates)
                 buffer.append((invocation, key if i == 0 else f"{key}#{i}", lm_iso))
             # Flush only between objects, so an object is never half committed.
             if len(buffer) >= INSERT_BATCH_SIZE:

@@ -53,10 +53,18 @@ profile = "log-archive"
     ('region = "x"\nfrom = 2026-10-31\nto = 2026-10-01' + SOURCE, "'to' must be after 'from'"),
     ('region = "x"\nfrom = "October"' + SOURCE, "must be a date"),
     ('region = ', "aiva.toml"),
+    ('region = "x"\nfrom = 2026-10-01\ninput_per_1m = 0' + SOURCE, "'input_per_1m' must be a positive number"),
+    ('region = "x"\nfrom = 2026-10-01\noutput_per_1m = "15"' + SOURCE, "'output_per_1m' must be a positive number"),
 ])
 def test_bad_config_gives_a_readable_error(tmp_path, text, message):
     with pytest.raises(ValueError, match=re.escape(message)):
         load_config(_write(tmp_path, text))
+
+
+def test_cost_rates_default_and_override(tmp_path):
+    assert load_config(_write(tmp_path, 'region = "x"\nfrom = 2026-10-01' + SOURCE)).rates == (3.0, 15.0)
+    config = load_config(_write(tmp_path, 'region = "x"\nfrom = 2026-10-01\ninput_per_1m = 2\noutput_per_1m = 10.5' + SOURCE))
+    assert config.rates == (2, 10.5)
 
 
 def test_to_date_includes_the_whole_day(tmp_path):

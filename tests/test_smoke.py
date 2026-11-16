@@ -7,7 +7,7 @@ Run: source .venv/bin/activate && pytest tests/ -v
 """
 import json
 
-from aiva.pricing import cost_range, estimate_cost
+from aiva.pricing import estimate_cost
 from aiva.cli import _group_into_sessions
 from aiva.classifier import _apply_verdict_rubric, project_monthly_cost, cap_use_cases, _build_cluster
 from aiva.html_reporter import _use_case_id, generate_html_report
@@ -21,10 +21,10 @@ from aiva.store import AuditStore
 
 
 # ---------------------------------------------------------------------------
-# Pricing: one ballpark rate for every model, shown as a range
+# Pricing: one rate for every model, set in the config
 # ---------------------------------------------------------------------------
 
-def test_estimate_cost_uses_sonnet_class_rates_for_any_tokens():
+def test_estimate_cost_defaults_and_cache_ratios():
     m = 1_000_000
     assert estimate_cost(m, 0) == 3.0
     assert estimate_cost(0, m) == 15.0
@@ -32,10 +32,8 @@ def test_estimate_cost_uses_sonnet_class_rates_for_any_tokens():
     assert abs(estimate_cost(0, 0, cache_write_tokens=m) - 3.75) < 1e-9
 
 
-def test_cost_range_spans_haiku_to_opus_class_rates():
-    low, high = cost_range(estimate_cost(1_000_000, 1_000_000))
-    assert abs(low - 6.0) < 1e-9    # $1 + $5
-    assert abs(high - 30.0) < 1e-9  # $5 + $25
+def test_estimate_cost_uses_given_rates():
+    assert estimate_cost(1_000_000, 1_000_000, input_per_1m=2.0, output_per_1m=10.0) == 12.0
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +273,7 @@ def test_html_report_generates_and_escapes_content(tmp_path):
     generate_html_report([_assessment()], str(out))
     html = out.read_text()
     assert "Test Use Case" in html
-    assert "Estimated Spend" in html and "Sonnet-class rates" in html
+    assert "Estimated Spend" in html and "$3 input and $15 output per 1M tokens" in html
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" not in html  # samples omitted entirely by default
 
@@ -293,7 +291,7 @@ def test_markdown_report_generates(tmp_path):
     md = out.read_text()
     assert "Test Use Case" in md
     assert "REFINE - Optimise These" in md
-    assert "| Estimated cost | $" in md and "Sonnet-class rates" in md
+    assert "| Total estimated cost | $" in md and "$3 input and $15 output per 1M tokens" in md
 
 
 def test_json_report_generates_and_is_valid_json(tmp_path):
@@ -302,8 +300,7 @@ def test_json_report_generates_and_is_valid_json(tmp_path):
     data = json.loads(out.read_text())
     assert data["schema"] == "aiva.audit.v1"
     assert data["summary"]["refine"] == 1
-    low, high = data["summary"]["estimated_cost_range_usd"]
-    assert low < data["summary"]["total_estimated_cost_usd"] < high
+    assert data["summary"]["cost_rates_usd_per_1m"] == {"input": 3.0, "output": 15.0}
     assert data["use_cases"][0]["name"] == "Test Use Case"
 
 
@@ -433,7 +430,6 @@ def test_otlp_normalise_log_record_with_token_counts():
     assert record.input_tokens == 1000
     assert record.output_tokens == 200
     assert record.caller == "test-user"
-    assert record.estimated_cost_usd > 0
     assert record.metadata["session_id"] == "sess-123"
     assert record.metadata["source_format"] == "otlp"
 

@@ -11,6 +11,8 @@ output = "report"           # local path or s3://bucket/key, no extension
 # format = "all"            # html, md, json, both (html+md) or all
 # max_use_cases = 50
 # show_samples = false      # true adds raw prompt text to the report
+# input_per_1m = 3.0        # USD per 1M input tokens for the cost estimate, any model
+# output_per_1m = 15.0      # USD per 1M output tokens
 
 # Bedrock Model Invocation Logs
 [[sources]]

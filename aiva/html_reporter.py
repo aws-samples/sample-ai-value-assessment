@@ -3,7 +3,7 @@ import hashlib
 import html as html_lib
 from datetime import datetime, timezone
 
-from aiva.pricing import COST_NOTE, cost_range
+from aiva.pricing import DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M, cost_note
 
 # Static, no per-report interpolation (checked: contains no Python f-string
 # placeholders), so its content and CSP hash never change between reports.
@@ -396,7 +396,8 @@ def _use_case_id(a):
     return "uc_" + hashlib.sha256(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
 
 
-def generate_html_report(assessments, output_path, show_samples=False, source="bedrock"):
+def generate_html_report(assessments, output_path, show_samples=False, source="bedrock",
+                         rates=(DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M)):
     """Generate a use-case HTML dashboard: Business summary + Technical drill-down.
 
     Each assessment is a de-duplicated business USE CASE that may span several
@@ -412,7 +413,6 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
     expand = [a for a in assessments if a["recommendation"] == "EXPAND"]
 
     total_cost = sum(a["metrics"]["total_cost_usd"] for a in assessments)
-    low_cost, high_cost = cost_range(total_cost)
     total_invocations = sum(a["metrics"]["invocation_count"] for a in assessments)
     total_sessions = sum(a["metrics"].get("session_count", 1) for a in assessments)
     stop_cost = sum(a["metrics"]["total_cost_usd"] for a in stop)
@@ -452,7 +452,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
         <div class="summary-grid">
             <div class="card">
                 <div class="label">Estimated Spend</div>
-                <div class="value">${low_cost:.2f} to ${high_cost:.2f}</div>
+                <div class="value">${total_cost:.2f}</div>
             </div>
             <div class="card">
                 <div class="label">Use Cases</div>
@@ -480,7 +480,7 @@ def generate_html_report(assessments, output_path, show_samples=False, source="b
             </div>
         </div>
 
-        <div class="source-caveat">{COST_NOTE} Use case costs are midpoints.</div>
+        <div class="source-caveat">{_escape(cost_note(*rates))}</div>
         <div class="cost-bar-section">
             <h3>Cost by Recommendation</h3>
             {_render_cost_bar(stop_cost, refine_cost, expand_cost, total_cost)}

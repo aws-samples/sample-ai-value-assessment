@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 
 from aiva.ingest import Source, s3_key_prefix
 from aiva.invocation import Invocation, as_int
-from aiva.pricing import estimate_cost
 
 
 MAX_PARTITION_DAYS = 400  # day folders listed at most, for a very old cutoff
@@ -39,8 +38,6 @@ def parse(raw, fetch_body):
     cache_read_tokens = as_int(input_section.get("cacheReadInputTokenCount"))
     cache_write_tokens = as_int(input_section.get("cacheWriteInputTokenCount"))
 
-    cost = estimate_cost(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-
     # Get input body (inline or from S3 reference)
     input_body = input_section.get("inputBodyJson", {})
     if not input_body and "inputBodyS3Path" in input_section:
@@ -56,7 +53,6 @@ def parse(raw, fetch_body):
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
-        estimated_cost_usd=cost,
         system_prompt=_extract_system_prompt(input_body),
         tools=_extract_tools(input_body),
         messages=_extract_messages(input_body),

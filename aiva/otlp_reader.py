@@ -10,15 +10,14 @@ and scope-level records with per-event attributes.
 This reader handles log events (resourceLogs). Trace spans (resourceSpans)
 are supported as a secondary signal source when log events are not available.
 
-Cost is estimated from token counts with the shared pricing module, the
-same way as for Bedrock logs. A source-reported cost_usd is ignored.
+Cost is estimated from token counts in aiva.ingest, the same way as for
+Bedrock logs. A source-reported cost_usd is ignored.
 """
 
 from datetime import datetime, timezone
 
 from aiva.ingest import Source, s3_key_prefix
 from aiva.invocation import Invocation, as_int
-from aiva.pricing import estimate_cost
 
 
 def log_prefix(prefix):
@@ -114,7 +113,6 @@ def _normalise_log_record(log_record, resource_attrs):
     timestamp = _nano_to_iso(time_nano)
 
     model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _extract_model_and_tokens(attrs, resource_attrs)
-    cost = estimate_cost(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
     caller = _extract_caller(attrs, resource_attrs)
     session_key = (attrs.get("session.id")
                    or resource_attrs.get("session.id")
@@ -148,7 +146,6 @@ def _normalise_log_record(log_record, resource_attrs):
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
-        estimated_cost_usd=cost,
         system_prompt=system_prompt,
         tools=tools,
         messages=messages,
@@ -183,7 +180,6 @@ def _normalise_span_record(span, resource_attrs):
     timestamp = _nano_to_iso(time_nano)
 
     model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _extract_model_and_tokens(attrs, resource_attrs)
-    cost = estimate_cost(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
     caller = _extract_caller(attrs, resource_attrs)
     session_key = (attrs.get("session.id")
                    or resource_attrs.get("session.id")
@@ -208,7 +204,6 @@ def _normalise_span_record(span, resource_attrs):
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
-        estimated_cost_usd=cost,
         system_prompt=system_prompt,
         tools=tools,
         messages=messages,

@@ -1,10 +1,10 @@
 import json
 from datetime import datetime, timezone
 
-from aiva.pricing import COST_NOTE, cost_range
+from aiva.pricing import DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M, cost_note
 
 
-def generate_json_report(assessments, output_path, meta=None, show_samples=False):
+def generate_json_report(assessments, output_path, meta=None, show_samples=False, rates=(DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M)):
     """Write a machine-readable JSON report (Prowler-style, one file).
 
     Structured for downstream tooling: a summary block plus one record per use
@@ -29,7 +29,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
             "sessions_analysed": total_sessions,
             "invocations_analysed": total_invocations,
             "total_estimated_cost_usd": round(total_cost, 4),
-            "estimated_cost_range_usd": [round(c, 4) for c in cost_range(total_cost)],
+            "cost_rates_usd_per_1m": {"input": rates[0], "output": rates[1]},
             "stop": _rec("STOP"), "refine": _rec("REFINE"), "expand": _rec("EXPAND"),
         },
         "use_cases": [],
@@ -74,7 +74,7 @@ def generate_json_report(assessments, output_path, meta=None, show_samples=False
         json.dump(report, f, indent=2)
 
 
-def generate_report(assessments, output_path, show_samples=False):
+def generate_report(assessments, output_path, show_samples=False, rates=(DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M)):
     """Generate a markdown report: Business view first, Technical view second."""
     stop = [a for a in assessments if a["recommendation"] == "STOP"]
     refine = [a for a in assessments if a["recommendation"] == "REFINE"]
@@ -94,8 +94,7 @@ def generate_report(assessments, output_path, show_samples=False):
     lines.append(f"| Distinct use cases | {len(assessments)} |")
     lines.append(f"| Sessions analysed | {total_sessions:,} |")
     lines.append(f"| Invocations analysed | {total_invocations:,} |")
-    low, high = cost_range(total_cost)
-    lines.append(f"| Estimated cost | ${low:.2f} to ${high:.2f} (midpoint ${total_cost:.2f}) |")
+    lines.append(f"| Total estimated cost | ${total_cost:.2f} |")
     lines.append(f"| Recommend STOP | {len(stop)} |")
     lines.append(f"| Recommend REFINE | {len(refine)} |")
     lines.append(f"| Recommend EXPAND | {len(expand)} |")
@@ -103,7 +102,7 @@ def generate_report(assessments, output_path, show_samples=False):
         stop_cost = sum(a["metrics"]["total_cost_usd"] for a in stop)
         lines.append(f"| Potential savings (STOP) | ${stop_cost:.2f} |")
 
-    lines.append(f"\n> {COST_NOTE} Use case costs are midpoints.")
+    lines.append(f"\n> {cost_note(*rates)}")
 
     # -------------------------------------------------------------------
     # Business view

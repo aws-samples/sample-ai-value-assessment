@@ -117,7 +117,7 @@ def _run_audit_with_store(store, config):
     # Step 1: Read logs from S3, streamed into the store in batches.
     for src in config.sources:
         console.print(f"[1/5] Reading {src.source.reading} from s3://{src.bucket}/{src.prefix}...")
-        result = read_to_store(store, src, from_date, to_date)
+        result = read_to_store(store, src, from_date, to_date, rates=config.rates)
         if result.skipped:
             console.print(f"  [yellow]Skipped {len(result.skipped)} unreadable objects or records, "
                           f"first: {result.skipped[0][0]} ({result.skipped[0][1]})[/yellow]")
@@ -189,13 +189,15 @@ def _write_reports(assessments, config):
 
     written = []
     if fmt in ("html", "both", "all"):
-        generate_html_report(assessments, f"{output}.html", show_samples=show_samples, source=source)
+        generate_html_report(assessments, f"{output}.html", show_samples=show_samples, source=source,
+                             rates=config.rates)
         written.append(".html")
     if fmt in ("md", "both", "all"):
-        generate_report(assessments, f"{output}.md", show_samples=show_samples)
+        generate_report(assessments, f"{output}.md", show_samples=show_samples, rates=config.rates)
         written.append(".md")
     if fmt in ("json", "all"):
-        generate_json_report(assessments, f"{output}.json", meta=run_meta, show_samples=show_samples)
+        generate_json_report(assessments, f"{output}.json", meta=run_meta, show_samples=show_samples,
+                             rates=config.rates)
         written.append(".json")
 
     if to_s3:
