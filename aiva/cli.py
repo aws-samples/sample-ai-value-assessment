@@ -76,6 +76,7 @@ def _execute(config, skip_preflight, db):
     console.print(f"  Region: {config.region}")
     console.print(f"  Window: {window}")
     console.print()
+    _prepare_output(config.output)
 
     if not skip_preflight:
         console.print("[0/5] Checking credentials, bucket access, and model access...")
@@ -168,6 +169,21 @@ def _run_audit_with_store(store, config):
         console.print(f"\n  [dim]Audit overhead: {audit_count} calls, ${audit_cost:.3f}[/dim]")
 
     console.print()
+
+
+def _prepare_output(output):
+    """Create the local report folder before the run, so a path that can't be
+    written fails now instead of after the S3 reads and Bedrock calls."""
+    if output.startswith("s3://"):
+        return
+    folder = os.path.dirname(output)
+    try:
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        if not os.access(folder or ".", os.W_OK):
+            raise PermissionError(f"no write permission on {folder or '.'}")
+    except OSError as e:
+        raise click.ClickException(f"Cannot write reports to {output}: {e}")
 
 
 def _write_reports(assessments, config):
