@@ -6,7 +6,7 @@
 region = "ap-southeast-2"   # where aiva calls Bedrock to classify
 from = 2026-10-01           # UTC, by when logs were written (edges can be a few minutes off)
 to = 2026-10-31             # includes that day; leave out to read up to now
-model = "global.anthropic.claude-sonnet-4-6"
+model = "global.anthropic.claude-sonnet-5-5"
 output = "report"           # local path or s3://bucket/key, no extension
 # format = "all"            # html, md, json, both (html+md) or all
 # max_use_cases = 50
