@@ -103,3 +103,23 @@ def test_every_setting_is_documented():
     doc = (ROOT / "docs" / "config.md").read_text()
     missing = [k for k in sorted((_RUN_KEYS - {"sources"}) | _SOURCE_KEYS) if f"| `{k}` |" not in doc]
     assert not missing, f"add to docs/config.md: {missing}"
+
+
+def test_config_reads_from_s3():
+    from botocore.exceptions import ClientError
+    s3 = mock.Mock()
+    s3.get_object.return_value = {"Body": mock.Mock(read=lambda: ('region = "x"\nfrom = 2026-10-01' + SOURCE).encode())}
+    with mock.patch("boto3.client", return_value=s3):
+        assert load_config("s3://configs/aiva/aiva.toml").region == "x"
+    s3.get_object.assert_called_once_with(Bucket="configs", Key="aiva/aiva.toml")
+
+    s3.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+    with mock.patch("boto3.client", return_value=s3), pytest.raises(ValueError, match="aiva.toml: no such object"):
+        load_config("s3://configs/aiva/aiva.toml")
+
+
+@pytest.mark.parametrize("path, message", [("s3://configs", "expected s3://bucket/key"),
+                                           ("missing.toml", "missing.toml: No such file or directory")])
+def test_bad_config_path_gives_a_readable_error(path, message):
+    with pytest.raises(ValueError, match=message):
+        load_config(path)

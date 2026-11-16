@@ -54,7 +54,7 @@ def audit(bucket, prefix, region, days, output, fmt, model, source, skip_preflig
 
 
 @main.command()
-@click.option("--config", "config_path", required=True, type=click.Path(exists=True, dir_okay=False), help="TOML file listing the log sources (see aiva.example.toml)")
+@click.option("--config", "config_path", required=True, help="TOML file listing the log sources, a local path or s3://bucket/key (see aiva.example.toml)")
 @click.option("--skip-preflight", is_flag=True, default=False, help="Skip credential/bucket/model access checks (not recommended)")
 @click.option("--db", default=None, help="Path to the local SQLite store (default: a temp file, deleted after the run)")
 def run(config_path, skip_preflight, db):

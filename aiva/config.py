@@ -11,6 +11,7 @@ from datetime import date, datetime, time, timedelta, timezone
 import boto3
 import botocore.session
 from botocore.credentials import RefreshableCredentials
+from botocore.exceptions import BotoCoreError, ClientError
 
 from aiva.pricing import DEFAULT_INPUT_PER_1M, DEFAULT_OUTPUT_PER_1M
 from aiva.sources import SOURCES
@@ -82,12 +83,13 @@ _SOURCE_KEYS = {"type", "bucket", "prefix", "region", "profile", "role_arn"}
 
 
 def load_config(path):
-    """Read and check a TOML config file. Raises ValueError with a readable message."""
-    with open(path, "rb") as f:
-        try:
-            raw = tomllib.load(f)
-        except tomllib.TOMLDecodeError as e:
-            raise ValueError(f"{path}: {e}") from e
+    """Read and check a TOML config file, a local path or s3://bucket/key.
+    Raises ValueError with a readable message."""
+    path = str(path)
+    try:
+        raw = tomllib.loads(_read_config(path).decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(f"{path}: {e}") from e
 
     unknown = set(raw) - _RUN_KEYS
     if unknown:
@@ -124,6 +126,28 @@ def load_config(path):
         sources.append(SourceConfig(**{"prefix": "", "region": raw["region"], **src}))
 
     return RunConfig(sources=sources, **settings)
+
+
+def _read_config(path):
+    """The config file's bytes. s3:// paths are read with the default AWS credentials."""
+    if not path.startswith("s3://"):
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except OSError as e:
+            raise ValueError(f"{path}: {e.strerror}") from e
+    bucket, _, key = path[5:].partition("/")
+    if not bucket or not key:
+        raise ValueError(f"{path}: expected s3://bucket/key")
+    try:
+        return boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        hint = {"NoSuchKey": "no such object", "NoSuchBucket": "no such bucket",
+                "AccessDenied": "access denied, check s3:GetObject on the config object"}.get(code, code)
+        raise ValueError(f"{path}: {hint}") from e
+    except BotoCoreError as e:
+        raise ValueError(f"{path}: {e}") from e
 
 
 def _as_utc(value, whole_day, what):
