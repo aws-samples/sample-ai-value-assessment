@@ -103,3 +103,26 @@ def test_every_setting_is_documented():
     doc = (ROOT / "docs" / "config.md").read_text()
     missing = [k for k in sorted((_RUN_KEYS - {"sources"}) | _SOURCE_KEYS) if f"| `{k}` |" not in doc]
     assert not missing, f"add to docs/config.md: {missing}"
+
+
+def _local_config(output):
+    return RunConfig(region="ap-southeast-2", from_date=datetime(2026, 10, 1, tzinfo=timezone.utc),
+                     output=output, format="all", sources=[SourceConfig("bedrock", "logs", "", "ap-southeast-2")])
+
+
+def test_reports_are_written_into_a_folder_that_does_not_exist_yet(tmp_path):
+    from aiva import cli
+    output = str(tmp_path / "out" / "new" / "report")
+    with mock.patch.object(cli, "_run_audit_with_store", side_effect=lambda store, cfg: cli._write_reports([], cfg)):
+        cli._execute(_local_config(output), skip_preflight=True, db=None)
+    assert sorted(p.name for p in (tmp_path / "out" / "new").iterdir()) == ["report.html", "report.json", "report.md"]
+
+
+def test_unwritable_output_fails_before_the_run_starts(tmp_path):
+    import click
+    from aiva import cli
+    (tmp_path / "a-file").write_text("")
+    audit = mock.Mock()
+    with mock.patch.object(cli, "_run_audit_with_store", audit), pytest.raises(click.ClickException, match="Cannot write reports"):
+        cli._execute(_local_config(str(tmp_path / "a-file" / "report")), skip_preflight=True, db=None)
+    audit.assert_not_called()
