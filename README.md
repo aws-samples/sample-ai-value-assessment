@@ -61,14 +61,40 @@ Run the AI Value Assessment (https://github.com/aws-samples/sample-ai-value-asse
 
 ## Where to run it
 
-1. **AWS CloudShell**, in the account and region of the logs. Credentials are
-   already set up and nothing is created. Sessions end after about 20 minutes
-   idle and home storage is about 1 GB, so it suits a week of a team's or
-   department's logs.
-2. **A laptop** with your usual AWS credentials (for example `aws sso login`).
-   No session limit; use this for large windows.
-3. **The CloudFormation stack** ([below](#deploy-with-cloudformation)), if your
-   account allows CodeBuild and one source over the last N days is enough.
+aiva is a CLI. It reads logs from S3 and calls Bedrock using the AWS
+credentials in its environment, resolved by the AWS SDK default credential
+provider chain (environment variables, shared config and SSO profiles, or an
+instance, task or pod role). It creates no AWS resources. It runs on any host
+that has these credentials and network access to the endpoints listed in
+[What it needs](#what-it-needs):
+
+- **A workstation** with your usual credentials (for example `aws sso login`).
+- **AWS CloudShell**, in the account and region of the logs. Sessions end after
+  about 20 minutes idle and home storage is about 1 GB, so it suits a week of a
+  team's or department's logs.
+- **An EC2 instance** reached with Session Manager, using its instance role.
+- **A container** on ECS Fargate, an EKS Job or any Docker host, using the task
+  or pod role. See [docs/containers.md](docs/containers.md).
+- **A CodeBuild project**, for example the [CloudFormation stack](#deploy-with-cloudformation).
+
+For real prompt data or long windows, run it inside the AWS account that holds
+the logs, so prompt text is not copied out of that account.
+
+### What it needs
+
+- **Permissions:** the table in [Before you start](#before-you-start).
+- **Network:** outbound HTTPS to S3, Bedrock Runtime and STS. No inbound
+  access. In a subnet without internet access, add VPC endpoints for S3
+  (gateway), `bedrock-runtime` and `sts`, and set
+  `AWS_STS_REGIONAL_ENDPOINTS=regional`.
+- **Disk:** the working store takes about 2 KB per invocation for short prompts
+  and up to about 50 KB for agentic tools, in the temp folder or the `--db` path.
+- **Input and output:** the config file and the report can be local paths or
+  `s3://` paths.
+- **Exit code:** 0 when the run finishes, including when no logs are found, and
+  1 when preflight or the run fails. A failed classification call does not
+  change the exit code. Progress goes to stdout, so it lands in CloudWatch Logs
+  on ECS and CodeBuild.
 
 ## Run it
 
