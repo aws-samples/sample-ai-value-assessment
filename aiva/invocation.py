@@ -1,4 +1,5 @@
-"""The one record type every source adapter produces and the store accepts."""
+"""The data model every source adapter produces and the store accepts: an
+Invocation per model call, plus Attachments for context reported apart from it."""
 
 from dataclasses import dataclass, field
 
@@ -51,11 +52,11 @@ def as_int(value):
 
 
 @dataclass
-class PromptContext:
-    """What a user asked, what came back, or which tool ran, for one prompt.
-    Not a model call, so it is never counted or priced. The store attaches it
-    to the calls with the same prompt_id when a session is fetched, since a
-    prompt's events can land in different S3 objects."""
+class Attachment:
+    """Context a source reports apart from the model call: what the user
+    asked, what came back, or which tool ran, for one prompt. Never counted
+    or priced. aiva.attachments puts it on the calls with the same prompt_id
+    (the Invocation's metadata["prompt_id"]) when a session is loaded."""
 
     prompt_id: str
     kind: str  # "prompt", "response" or "tool"

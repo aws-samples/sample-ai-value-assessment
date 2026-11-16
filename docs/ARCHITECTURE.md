@@ -28,8 +28,10 @@ an S3 bucket you choose.
 |---|---|---|
 | Config | `aiva/config.py` | Reads `aiva.toml` (see [config.md](config.md)), or the `aiva audit` flags |
 | Read | `aiva/ingest.py` | Lists, fetches and decompresses log objects, splits them into JSON documents, skips bad objects, batches rows into the store. Shared by every source |
-| Parse | `aiva/reader.py`, `aiva/otlp_reader.py` | One adapter per source turns a JSON document into `Invocation` records (`aiva/invocation.py`). Registered in `aiva/sources.py` |
+| Parse | `aiva/reader.py`, `aiva/otlp_reader.py` | One adapter per source turns a JSON document into the data model (`aiva/invocation.py`). Registered in `aiva/sources.py` |
+| Dialects | `aiva/dialects/` | For OpenTelemetry, one module per telemetry schema (Claude Code and Cowork, GenAI conventions) decides what each event means |
 | Store | `aiva/store.py` | Local SQLite file. Light columns for grouping, full content fetched per session |
+| Attachments | `aiva/attachments.py` | Puts context that arrived apart from a call back onto that call when a session is loaded |
 | Sessions | `aiva/cli.py` | Groups by an explicit session id, otherwise by caller with a 30 minute gap |
 | Classify | `aiva/classifier.py`, `aiva/prompts/` | Three passes, below |
 | Report | `aiva/html_reporter.py`, `aiva/reporter.py` | HTML, Markdown and JSON |
@@ -38,6 +40,48 @@ The three passes:
 1. **Describe** each session's business task, looking past the tool to the work.
 2. **Cluster** the activities into use cases by meaning.
 3. **Assess** each use case: STOP/REFINE/EXPAND, experimental or repeatable, and cost checks. Costs and monthly projections are computed in code, not by the model.
+
+## Layers
+
+Each layer only knows the one below it, so product-specific rules stay in one
+place and the store, sessions and classifier never change when a source is added.
+
+```mermaid
+flowchart TB
+    transport["Transport<br/>reader.py, otlp_reader.py<br/>decode the file format"] --> dialects
+    dialects["Dialects<br/>dialects/claude_code.py, dialects/genai.py<br/>what each event means"] --> model
+    model["Data model<br/>invocation.py<br/>Invocation + Attachment"] --> store
+    store["Store<br/>store.py<br/>persists records as-is"] --> attachments
+    attachments["Attachments<br/>attachments.py<br/>joins context onto calls"] --> engines
+    engines["Engines<br/>sessions, classifier, reports"]
+```
+
+- **Data model.** `Invocation` is one model call and stays small and
+  source-neutral. Anything a source reports apart from the call (prompt text,
+  response text, tool names) is an `Attachment`, keyed by `prompt_id`. New
+  kinds of context are new attachment kinds, not new `Invocation` fields or
+  subclasses.
+- **Transport.** Decodes a file format (Bedrock log JSON, OTLP JSON) and knows
+  nothing about the products that wrote it. Bedrock logs have one schema, so
+  `reader.py` covers both transport and dialect.
+- **Dialects.** One module per telemetry schema with `matches(event)` and
+  `to_record(event)`. Tried in order, first match wins and owns the event,
+  including dropping it. Matched by event name, not only `service.name`, since
+  `OTEL_SERVICE_NAME` can be changed. The GenAI conventions are last, as the
+  fallback. Adding a schema (for example another agent framework) is one
+  module and one entry in `aiva/dialects/__init__.py`.
+- **Store.** Persists invocations and attachments and returns them. It holds no
+  join or product logic.
+- **Attachments.** The only place that knows how attachments join onto calls.
+  The join happens when a session is loaded, not while parsing, because an
+  OpenTelemetry collector batches by time and a prompt's events can land in
+  different S3 objects. The prompt and tool names go on the prompt's first
+  call, a response on the call with its `request_id`.
+- **Engines.** Sessions, classifier and reporters see only invocations with
+  their context filled in.
+
+Only model calls become invocations, so counts and cost are never inflated by
+tool, hook or prompt events.
 
 ## Memory ceiling
 

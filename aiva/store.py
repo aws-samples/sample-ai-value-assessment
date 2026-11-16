@@ -29,7 +29,7 @@ import json
 import sqlite3
 import threading
 
-from aiva.invocation import PromptContext
+from aiva.invocation import Attachment
 
 # requestMetadata keys that carry an explicit session/conversation identifier.
 # Checked in order; first present wins. Moved here (from cli.py) because
@@ -82,11 +82,10 @@ class AuditStore:
                 payload TEXT NOT NULL
             )
         """)
-        # PromptContext rows: prompt text, response text and tool names from
-        # sources that report them as separate events (OTel). Never counted
-        # or priced, only attached to calls in fetch_full_invocations.
+        # Attachments (aiva/invocation.py) are stored as-is. How they join
+        # onto invocations lives in aiva/attachments.py, not here.
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS context (
+            CREATE TABLE IF NOT EXISTS attachments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 s3_key TEXT UNIQUE,
                 prompt_id TEXT NOT NULL,
@@ -96,7 +95,7 @@ class AuditStore:
                 timestamp TEXT
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_context_prompt ON context(prompt_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_attachments_prompt ON attachments(prompt_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_session_key ON invocations(session_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_overhead ON invocations(is_audit_overhead)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_last_modified ON invocations(last_modified)")
@@ -110,7 +109,7 @@ class AuditStore:
     def insert_invocations(self, items):
         """Insert a batch of (record, s3_key, last_modified_iso) tuples in one
         transaction. `record` is an aiva.invocation.Invocation or
-        PromptContext. Call from
+        Attachment. Call from
         a single thread only, the S3 fetch's worker threads run concurrently
         but the caller collects their results and inserts on the main thread,
         avoiding concurrent SQLite writers entirely.
@@ -119,14 +118,14 @@ class AuditStore:
         present is a silent no-op, not a duplicate row and not an error.
         """
         conn = self._connect()
-        context = [(s3_key, c.prompt_id, c.kind, c.text, c.request_id, c.timestamp)
-                   for c, s3_key, _ in items if isinstance(c, PromptContext)]
+        attachments = [(s3_key, a.prompt_id, a.kind, a.text, a.request_id, a.timestamp)
+                       for a, s3_key, _ in items if isinstance(a, Attachment)]
         rows = [_to_row(record, s3_key, last_modified) for record, s3_key, last_modified in items
-                if not isinstance(record, PromptContext)]
+                if not isinstance(record, Attachment)]
         conn.executemany(
-            "INSERT OR IGNORE INTO context (s3_key, prompt_id, kind, text, request_id, timestamp) "
+            "INSERT OR IGNORE INTO attachments (s3_key, prompt_id, kind, text, request_id, timestamp) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            context,
+            attachments,
         )
         conn.executemany(
             "INSERT OR IGNORE INTO invocations (s3_key, last_modified, timestamp, model, "
@@ -145,7 +144,7 @@ class AuditStore:
         conn = self._connect()
         return {row[0] for row in conn.execute(
             "SELECT s3_key FROM invocations WHERE s3_key NOT LIKE '%#%' "
-            "UNION SELECT s3_key FROM context WHERE s3_key NOT LIKE '%#%'")}
+            "UNION SELECT s3_key FROM attachments WHERE s3_key NOT LIKE '%#%'")}
 
     def fetch_light_rows(self):
         """Return all non-audit-overhead rows with only the light (session
@@ -188,9 +187,19 @@ class AuditStore:
             "WHERE id IN (SELECT value FROM json_each(?)) ORDER BY id ASC",
             (json.dumps(list(ids)),),
         )
-        invocations = [_from_row(row) for row in cur.fetchall()]
-        _attach_context(conn, invocations)
-        return invocations
+        return [_from_row(row) for row in cur.fetchall()]
+
+    def fetch_attachments(self, prompt_ids):
+        """Attachments for the given prompt ids, oldest first."""
+        if not prompt_ids:
+            return []
+        conn = self._connect()
+        cur = conn.execute(
+            "SELECT prompt_id, kind, text, request_id, timestamp FROM attachments "
+            "WHERE prompt_id IN (SELECT value FROM json_each(?)) ORDER BY timestamp, id",
+            (json.dumps(list(prompt_ids)),),
+        )
+        return [Attachment(*row) for row in cur.fetchall()]
 
     def overhead_summary(self):
         """Return (count, total_cost_usd) for AI Value Assessment's own audit-overhead calls."""
@@ -280,30 +289,3 @@ def _from_row(row):
         "metadata": payload.get("metadata", {}),
     }
 
-
-def _attach_context(conn, invocations):
-    """Put each prompt's text and tool names on its first call, and each
-    response on the call with its request_id (else the first call)."""
-    first_call = {}
-    for inv in invocations:
-        prompt_id = inv["metadata"].get("prompt_id")
-        if prompt_id and prompt_id not in first_call:
-            first_call[prompt_id] = inv
-    if not first_call:
-        return
-    by_request = {inv["request_id"]: inv for inv in invocations if inv["request_id"]}
-    cur = conn.execute(
-        "SELECT prompt_id, kind, text, request_id FROM context "
-        "WHERE prompt_id IN (SELECT value FROM json_each(?)) ORDER BY timestamp, id",
-        (json.dumps(list(first_call)),),
-    )
-    for prompt_id, kind, text, request_id in cur.fetchall():
-        call = first_call[prompt_id]
-        if kind == "prompt" and not call["messages"]:
-            call["messages"] = [{"role": "user", "content": text}]
-        elif kind == "tool" and text not in call["tools"]:
-            call["tools"].append(text)
-        elif kind == "response":
-            call = by_request.get(request_id, call)
-            if not call["response_text"]:
-                call["response_text"] = text

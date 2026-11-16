@@ -13,6 +13,7 @@ from botocore.exceptions import ClientError
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from fake_s3 import FakeS3  # noqa: E402
 
+from aiva.attachments import load_invocations  # noqa: E402
 from aiva.config import SourceConfig  # noqa: E402
 from aiva.ingest import read_to_store  # noqa: E402
 from aiva.invocation import Invocation  # noqa: E402
@@ -148,7 +149,7 @@ def test_otlp_one_invocation_per_call_with_context_from_other_objects(tmp_path):
     rows = store.fetch_light_rows()
     assert [(r["request_id"], r["model"], r["session_key"]) for r in rows] == [
         ("r-1", "claude-sonnet-4-6", "s-1"), ("r-2", "claude-sonnet-4-6", "s-1")]
-    first, second = store.fetch_full_invocations([r["id"] for r in rows])
+    first, second = load_invocations(store, [r["id"] for r in rows])
     assert first["messages"] == [{"role": "user", "content": "fix the failing test in billing"}]
     assert first["tools"] == ["Bash"]
     assert (first["response_text"], second["response_text"]) == ("", "fixed the rounding in the billing test")

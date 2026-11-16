@@ -37,7 +37,7 @@ class Source:
     log_prefix: Callable     # (prefix) -> key prefix the logs live under
     list_prefixes: Callable  # (s3, bucket, log_prefix, from_date) -> prefixes to list
     wants_key: Callable      # (key relative to log_prefix) -> bool
-    parse: Callable          # (json document, fetch_body) -> Invocations and PromptContext
+    parse: Callable          # (json document, fetch_body) -> Invocations and Attachments
 
 
 @dataclass

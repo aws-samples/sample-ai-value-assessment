@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 
+from aiva.attachments import load_invocations
 from aiva.prompts.common import make_nonce
 from aiva.prompts.pass1_describe import Pass1DescribePrompt
 from aiva.prompts.pass2a_cluster import Pass2aClusterPrompt
@@ -60,7 +61,7 @@ def classify_activities(store, sessions, region, model_id):
         return _local.bedrock
 
     def _describe(session):
-        invocations = store.fetch_full_invocations(session["invocation_ids"])
+        invocations = load_invocations(store, session["invocation_ids"])
         return _describe_activity(_client(), session, invocations, model_id)
 
     max_workers = min(PASS1_MAX_WORKERS, len(sessions))
