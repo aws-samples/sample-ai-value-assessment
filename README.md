@@ -49,7 +49,7 @@ Run the AI Value Assessment (https://github.com/aws-samples/sample-ai-value-asse
    and key prefix. Logs only exist from then on, so let a few days of usage
    build up.
 2. **Enable the classification model** in Bedrock (default
-   `global.anthropic.claude-sonnet-4-6`, or set `model` in the config).
+   `global.anthropic.claude-sonnet-5-5`, or set `model` in the config).
 3. **Permissions for the person running it:**
 
 | Needs | When |
@@ -143,7 +143,7 @@ In the CloudFormation console, create a stack and upload
    **DestinationBucketName**, or leave it blank to have one generated. If the
    log bucket uses SSE-KMS with a customer managed key, set
    **SourceBucketKmsKeyArn**. **ClassifierModelId** takes any Bedrock model ID
-   or inference profile ID/ARN (default `global.anthropic.claude-sonnet-4-6`).
+   or inference profile ID/ARN (default `global.anthropic.claude-sonnet-5-5`).
    For OpenTelemetry logs set **SourceFormat** to `otlp`.
 3. Optionally set **ReportReaderPrincipalArn** to the single IAM identity that
    may read the report. Left blank, any principal in the account can read it.
@@ -208,7 +208,7 @@ Bedrock usage is your existing logs; the tool only reads and summarises them.
 
 The table below is illustrative, not a quote. Cost scales with the number of
 distinct sessions, not raw invocation count. Rates are the default classification model,
-Sonnet 4.6, at $3.00 per million input tokens and $15.00 per million output.
+Sonnet 5.5, at $2.00 per million input tokens and $10.00 per million output.
 
 | Log volume (1 week) | Objects / invocations | Distinct sessions | Approx cost to run |
 |---------------------|-----------------------|-------------------|--------------------|

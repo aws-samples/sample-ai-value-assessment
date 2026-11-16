@@ -49,7 +49,7 @@ Parameters:
       Code or Cowork via an OTEL Collector with the awss3 exporter).
   ClassifierModelId:
     Type: String
-    Default: global.anthropic.claude-sonnet-4-6
+    Default: global.anthropic.claude-sonnet-5-5
     Description: Bedrock model ID or inference profile ID/ARN used to classify usage.
   SourceBucketKmsKeyArn:
     Type: String

@@ -11,7 +11,7 @@ run with a message naming them.
 | `region` | yes | | Region aiva calls Bedrock in to classify. Also the default region for sources |
 | `from` | yes | | Start date, e.g. `2026-10-01` (UTC) |
 | `to` | no | now | End date, inclusive. A date includes that whole day |
-| `model` | no | `global.anthropic.claude-sonnet-4-6` | Bedrock model ID or inference profile ID/ARN used to classify |
+| `model` | no | `global.anthropic.claude-sonnet-5-5` | Bedrock model ID or inference profile ID/ARN used to classify |
 | `output` | no | `report` | Report path without extension. A local path or `s3://bucket/key` |
 | `format` | no | `all` | `html`, `md`, `json`, `both` (html and md) or `all` |
 | `max_use_cases` | no | `50` | Use cases assessed one by one. The rest roll into "Other" |

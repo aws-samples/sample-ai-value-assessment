@@ -14,7 +14,7 @@ from botocore.credentials import RefreshableCredentials
 
 from aiva.sources import SOURCES
 
-DEFAULT_MODEL = "global.anthropic.claude-sonnet-4-6"
+DEFAULT_MODEL = "global.anthropic.claude-sonnet-5-5"
 FORMATS = ["html", "md", "json", "both", "all"]
 
 
