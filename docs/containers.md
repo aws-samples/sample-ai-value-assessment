@@ -1,7 +1,7 @@
 # Run in a container
 
-The [`Dockerfile`](../Dockerfile) builds aiva from the checked-out source, so the
-version is whatever you check out. Build it yourself and push it to your own
+The [`Dockerfile`](../Dockerfile) builds aiva from the checked-out source. The
+image contains the version of the commit or tag it is built from. Build it yourself and push it to your own
 registry. aiva reads prompt data, so most teams will want their own image scan
 and signing rather than a public image.
 

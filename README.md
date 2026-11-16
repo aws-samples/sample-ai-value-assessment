@@ -61,9 +61,12 @@ Run the AI Value Assessment (https://github.com/aws-samples/sample-ai-value-asse
 
 ## Where to run it
 
-aiva is a CLI that reads S3 and calls Bedrock with whatever AWS credentials it
-finds (the standard SDK chain). It creates no AWS resources, so it runs anywhere
-those credentials and endpoints are available:
+aiva is a CLI. It reads logs from S3 and calls Bedrock using the AWS
+credentials in its environment, resolved by the AWS SDK default credential
+provider chain (environment variables, shared config and SSO profiles, or an
+instance, task or pod role). It creates no AWS resources. It runs on any host
+that has these credentials and network access to the endpoints listed in
+[What it needs](#what-it-needs):
 
 - **A workstation** with your usual credentials (for example `aws sso login`).
 - **AWS CloudShell**, in the account and region of the logs. Sessions end after
